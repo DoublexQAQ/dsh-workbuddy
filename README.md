@@ -118,26 +118,6 @@ config:
 `~/.dsh-workbuddy/`：账号池 `accounts.json`、会话链映射、可选的出站日志。
 在设置页点「移除」就会连凭据一起删掉。
 
-## 站点专属指纹（可选）
-
-插件出站前会把正文里的宿主痕迹改写掉（`deepseek-harness/…`、`DSH`、`app.asar`、`dsh-*` 等），
-这些**任何 DSH 都会留下**的通用痕迹在默认表里，不用配置。
-
-如果你在自己的 DSH 里额外装了人格 / 注入了固定文案，那属于**你这台机器特有**的东西，
-放在本机状态目录里，不要写进仓库或 patch：
-
-```jsonc
-// ~/.dsh-workbuddy/sanitize.json
-{
-  "extraRules": [
-    { "pattern": "某个固定句子", "flags": "g", "replacement": "", "why": "人格注入文案" },
-    { "pattern": "某插件名", "replacement": "the local bundle", "why": "插件包名" }
-  ],
-  "words": ["额外想脱敏的词"]
-}
-```
-
-改完重启一次 DSH 生效。它只影响**本机出站正文**，不改变插件对别人的行为。
 
 ## 许可
 
