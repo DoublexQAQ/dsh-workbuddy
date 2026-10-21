@@ -1,0 +1,20 @@
+# 依赖（本插件零依赖，但 node_modules 不该进仓库）
+node_modules/
+pnpm-lock.yaml
+package-lock.json
+
+# 运行期状态：账号池、会话链映射、出站诊断
+.dsh-workbuddy/
+*.session.json
+*device-token*.json
+accounts.json
+outbound.jsonl
+
+# 日志与临时文件
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+
+# 开发自检脚本只留在本机：仓库对外只有插件本体
+/test/

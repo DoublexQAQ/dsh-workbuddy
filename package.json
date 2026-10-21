@@ -1,0 +1,45 @@
+{
+  "name": "dsh-workbuddy",
+  "version": "1.2.0",
+  "private": true,
+  "type": "module",
+  "description": "把 WorkBuddy / CodeBuddy 订阅接进 DSH：出站按官方客户端对齐（上游看不到 DSH），设置页可登录多个国内账号，按北京时区每天自动签到领积分，模型名字里直接标注免费/倍率。",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "src",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "workbuddy",
+    "codebuddy",
+    "llm-provider",
+    "fingerprint",
+    "daily-checkin"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": []
+    }
+  },
+  "license": "MIT"
+}

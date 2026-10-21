@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "WorkBuddy 账号",
+    "description": "把 WorkBuddy / CodeBuddy 官方订阅变成 DSH 的模型 provider（出站指纹对齐官方客户端），并在设置页里登录、切换多个国内账号，按北京时区每天自动签到领积分。"
+  }
+}

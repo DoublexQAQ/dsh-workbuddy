@@ -1,0 +1,41 @@
+# dsh-workbuddy bundle patch.
+#
+# 一条 insert 挂载 Host row（模型车道 + 账号池 + 每日积分 + 设置页接口）；
+# 浏览器半身（设置页里的「WorkBuddy 账号」）由 package.json 的 dsh.client 声明，
+# 绑定在 name 为裸包名的这一行上。
+#
+# 这里**只放通用默认值**：不放任何某台机器特有的东西（注入文案、本机路径、账号）。
+# 站点专属的指纹清洗放本机状态目录 `~/.dsh-workbuddy/sanitize.json`，见 README。
+- insert:
+    - id: dsh-workbuddy
+      name: 'dsh-workbuddy'
+      config:
+        # 注册哪两条平台路由；只用一个平台就删掉另一条。
+        # 如果路由名已被别的插件占用，可用 routeNames 改名：
+        #   routeNames: { codebuddy: 'my-codebuddy' }
+        routes:
+          - workbuddy
+          - codebuddy
+        # 凭据失效时自动开一次浏览器完成官方 SSO 授权（URL 同时写进日志）。
+        # 设 false 则只在设置页里显示授权链接，不自动弹浏览器。
+        autoLogin: true
+        openBrowser: true
+        # 当前账号被上游拒绝时，自动切到下一个启用账号。
+        failover: true
+        # ── 每日积分（国内账号；北京时间）────────────────────────────────
+        # 命中整点就跑完整闭环（签到 + 连登兑换/抽奖 + 活跃 + 余额）；
+        # 启动/唤醒时若当天已过最后一个时点且没跑过，会追赶一次。
+        autoCheckin: true
+        checkinHours: [9, 21]
+        autoActivity: true
+        activityHours: [10]
+        # 顺带把已解锁的连登档位兑换掉、把抽奖次数抽完（只涨积分，不花积分）。
+        autoGrowth: true
+        # ── 出站诊断 ────────────────────────────────────────────────────
+        # 置 true 会把每次出站的脱敏摘要写到 ~/.dsh-workbuddy/outbound.jsonl。
+        traceOutbound: false
+        # ── 正文清洗（通用部分）───────────────────────────────────────────
+        sanitize:
+          scrub: true
+          desensitize: true
+          scrubUser: false

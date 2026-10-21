@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="WorkBuddy bridge">
+  <defs>
+    <linearGradient id="wb-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1c2b4a"/>
+      <stop offset="1" stop-color="#0b1220"/>
+    </linearGradient>
+    <linearGradient id="wb-flow" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#39d0a0"/>
+      <stop offset="1" stop-color="#5c8dff"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#wb-bg)"/>
+  <rect x="2.75" y="2.75" width="58.5" height="58.5" rx="13.5" fill="none" stroke="#3d5480" stroke-width="1.5"/>
+  <path d="M12 40.5 L20 22.5 L27 34.5 L34 22.5 L42 22.5 L34 40.5 L27 28.5 Z" fill="#8ea6cc" opacity="0.94"/>
+  <path d="M24 45.5 h14 a3.5 3.5 0 0 0 0 -7 h-9" fill="none" stroke="url(#wb-flow)" stroke-width="3" stroke-linecap="round"/>
+  <path d="M31.5 34.5 l-3.5 4 3.5 4" fill="none" stroke="url(#wb-flow)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="46" cy="42" r="3.2" fill="#39d0a0"/>
+  <circle cx="15" cy="46" r="2.4" fill="#5c8dff"/>
+</svg>
