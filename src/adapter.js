@@ -20,6 +20,7 @@
 
 import { buildHeaders } from './identity.js'
 import { displayDescription, displayName } from './catalog.js'
+import { DegradeWindow, isSecurityRejection, neutralizeChatBody } from './prompt.js'
 import { openStream, TransportError } from './http.js'
 import { needsVision, repairToolPairing, toChatMessages, toToolDefs } from './messages.js'
 import { sanitizeOutbound } from './sanitize.js'
@@ -51,6 +52,8 @@ export class WorkBuddyAdapter {
   constructor(deps) {
     this.deps = deps
     this.logger = deps.logger ?? {}
+    /** 内容安全降级窗口：某条路由被 system 指纹拦过后，当天剩余时间直接走中性提示词。 */
+    this.degrade = new DegradeWindow()
   }
 
   /** @param {string} provider */
@@ -286,13 +289,18 @@ export class WorkBuddyAdapter {
       onImageDropped: reason => this.logger.debug?.(`workbuddy: dropped an image block (${reason}); 该路由暂不做视觉内联`),
     })
     const tools = toToolDefs(options.tools ?? [])
+    // 内容安全降级期：直接把 system 换成中性提示词，不再先撞一次 400。
+    const degraded = this.degrade.isActive(provider)
     const sanitized = sanitizeOutbound({
-      system: options.system,
+      system: degraded ? undefined : options.system,
       messages: projected,
       options: this.deps.config.sanitize ?? {},
     })
     const messages = [...sanitized.messages]
-    if (typeof sanitized.system === 'string' && sanitized.system !== '') {
+    if (degraded) {
+      // neutralizeChatBody 返回处理后的对象：拿回它的 messages，别指望原地改本地数组。
+      messages.splice(0, messages.length, ...neutralizeChatBody({ messages }).messages)
+    } else if (typeof sanitized.system === 'string' && sanitized.system !== '') {
       const first = messages[0]
       if (first?.role === 'system') messages[0] = { role: 'system', content: `${sanitized.system}\n\n${first.content}` }
       else messages.unshift({ role: 'system', content: sanitized.system })
@@ -394,6 +402,15 @@ export class WorkBuddyAdapter {
         return
       }
       const failure = toLlmFailure(error)
+      // 内容安全拒答（unapproved channel / blocked by security policy）：拦的是 system
+      // 提示词的内容，不是账号也不是凭据——换号重发照样 400。解法：删掉客户端 system，
+      // 换内置中性提示词**同请求内重试一次**；仍被拦说明用户内容自己撞了审核，如实上抛。
+      if (isSecurityRejection(failure.message) && options.securityRetry !== true && this.deps.config.promptMode !== 'passthrough') {
+        const until = this.degrade.engage(provider)
+        this.logger.warn?.(`workbuddy: 上游按内容安全策略拒掉了本次 system（${failure.message}）；已降级为中性提示词重试，并持续到 ${new Date(until).toISOString()}`)
+        yield* this.runStream({ ...options, securityRetry: true })
+        return
+      }
       if (failure.code === 'CREDENTIAL'
         && options.retryAfterAuth !== true
         && this.deps.config.autoRefresh !== false

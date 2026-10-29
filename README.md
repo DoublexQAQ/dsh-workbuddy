@@ -84,7 +84,7 @@ hunyuan-2.0-thinking · ×0.04   Default · ×2.2
 ```
 
 完整配置项都在 [cordis.patch.yml](cordis.patch.yml) 的注释里。
-站点专属的指纹清洗不放这里，放 `~/.dsh-workbuddy/sanitize.json`（见下）。
+站点专属的指纹清洗不放这里，放本机状态目录 `~/.dsh-workbuddy/sanitize.json`（改完重启一次生效）。
 
 ## 常见问题
 
@@ -94,6 +94,15 @@ hunyuan-2.0-thinking · ×0.04   Default · ×2.2
 **登录之后模型用不了**
 两条路由的账号是**互相隔离**的：国内账号不能给海外路由用。如果你选的是 `workbuddy`（海外）
 下面的模型，需要单独登一个海外账号；反之亦然。
+
+**报 `HTTP 400 · Illegal API invocation from an unapproved channel`
+上游对 system prompt 有内容安全策略：某些宿主注入的系统提示（长合规模板、
+敏感话题措辞）会被逐字命中并拦在推理之前——拦的是**请求内容**，不是账号也不是凭据。
+插件已内建处理：撞到这条时，自动把 system 换成内置中性提示词**同请求内重试一次**，
+并把该路由保持在降级状态到下一个北京零点（期内不再先撞墙）。
+日常使用无需任何操作；如果你确实想保持客户端 system 原样、被拦就直接报错，
+设 `promptMode: passthrough`。注意：降级只替换 system，你的对话内容一字不动；
+如果是**用户自己的输入**触发了审核，重试也过不了，会如实报错。
 
 **和别的插件撞了路由**
 插件注册的是 llm 路由 `workbuddy` / `codebuddy`。如果另一个插件已经占了同名路由，

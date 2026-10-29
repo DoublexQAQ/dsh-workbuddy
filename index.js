@@ -69,6 +69,8 @@ const DEFAULTS = Object.freeze({
   headerExtras: undefined,
   bodyExtras: undefined,
   sanitize: { scrub: true, desensitize: true, scrubUser: false },
+  /** `passthrough` 关闭内容安全降级（保持客户端 system 原样，被上游拦就直接报错）。 */
+  promptMode: 'auto',
   traceOutbound: false,
   /** 每日积分任务。 */
   autoCheckin: true,
