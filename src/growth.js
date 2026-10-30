@@ -46,11 +46,12 @@ export const CLI_UA = 'CLI/2.63.2 CodeBuddy/2.63.2'
  * @param {{accessToken?: string, uid?: string, domain?: string, enterpriseId?: string}} input.auth
  * @param {string|undefined} [input.deviceToken]
  * @param {object} [input.config] - 插件 config
+ * @param {string} [input.platform] - `codebuddy`（默认）/ `workbuddy`；决定 UA / 产品头取哪个平台的档案
  */
-export function controlHeaders({ flavor, auth, deviceToken, config = {} }) {
-  const profile = PLATFORMS.codebuddy
+export function controlHeaders({ flavor, auth, deviceToken, config = {}, platform = 'codebuddy' }) {
+  const profile = PLATFORMS[platform] ?? PLATFORMS.codebuddy
   const headers = {
-    'user-agent': flavor === 'cli' ? (config.cliUserAgent ?? CLI_UA) : (config.userAgent ?? CN_USER_AGENT),
+    'user-agent': flavor === 'cli' ? (config.cliUserAgent ?? CLI_UA) : (config.userAgent ?? profile.userAgent),
     'x-product': profile.product,
     'x-product-version': profile.productVersion,
     'x-ide-type': profile.ideType,
@@ -98,17 +99,18 @@ function firstNumber(payload, keys) {
  * @param {string} [input.deviceToken]
  * @param {object} [input.config]
  * @param {AbortSignal} [input.signal]
+ * @param {'codebuddy'|'workbuddy'} [input.platform] - 余额/签到按**账号所属平台**的域名与指纹发
  * @returns {Promise<{ok: boolean, already: boolean, credit?: number, streakDays?: number, message: string}>}
  */
-export async function dailyCheckin({ session, deviceToken, config = {}, signal }) {
-  const bases = Array.isArray(config.checkinBases) && config.checkinBases.length > 0 ? config.checkinBases : BILLING_BASES
+export async function dailyCheckin({ session, deviceToken, config = {}, signal, platform = 'codebuddy' }) {
+  const bases = billingBases(platform, config)
   let lastMessage = ''
   for (const base of bases) {
     try {
       const response = await jsonRequest({
         url: `${String(base).replace(/\/+$/, '')}/billing/meter/daily-checkin`,
         method: 'POST',
-        headers: controlHeaders({ flavor: 'desktop', auth: session, deviceToken, config }),
+        headers: controlHeaders({ flavor: 'desktop', auth: session, deviceToken, config, platform }),
         body: {},
         timeoutMs: Number(config.requestTimeoutMs ?? 30_000),
         signal,
@@ -135,11 +137,22 @@ export async function dailyCheckin({ session, deviceToken, config = {}, signal }
       if (/已签到|明天再来|already\s*(checked|signed|claimed)/i.test(lastMessage)) {
         return { ok: true, already: true, message: '今天已经领过了' }
       }
+      // 国际版实测（2026-10-30）：`10001 · 签到活动未开启或已过期`——活动对该平台
+      // 没开。这不是失败也不是领过，如实转述，且不再对同一天重试。
+      if (/未开启|已过期|not\s+(enabled|started)|activity.*(expired|not\s+available)/i.test(lastMessage)) {
+        return { ok: true, already: false, unavailable: true, message: `该平台未开启签到活动（上游：${lastMessage.replace(/^.*?(?=签到|code|\d{5})/, '')}）` }
+      }
       // 401 说明凭据问题，换域名也没用；其余（404/405 之类的域差异）继续回落尝试。
       if (error?.status === 401 || error?.code === 'CREDENTIAL') break
     }
   }
   return { ok: false, already: false, message: lastMessage || '签到失败' }
+}
+
+/** 平台 -> 计费域候选。国际版的计费就在 www.workbuddy.ai（实测 200）。 */
+function billingBases(platform, config) {
+  if (platform === 'workbuddy') return [PLATFORMS.workbuddy.endpoint]
+  return Array.isArray(config.checkinBases) && config.checkinBases.length > 0 ? config.checkinBases : BILLING_BASES
 }
 
 /** 积分余额。
@@ -157,15 +170,15 @@ export async function dailyCheckin({ session, deviceToken, config = {}, signal }
  * 所以余额 = `TotalDosage`（上游自己汇总的剩余），拿不到就退化成逐包 `CapacityRemain` 求和。
  * 同时把「最近会过期的那些包」带出来：积分按到期日作废，这一点用户必须看得见。
  */
-export async function userResource({ session, deviceToken, config = {}, signal }) {
-  const bases = Array.isArray(config.checkinBases) && config.checkinBases.length > 0 ? config.checkinBases : BILLING_BASES
+export async function userResource({ session, deviceToken, config = {}, signal, platform = 'codebuddy' }) {
+  const bases = billingBases(platform, config)
   let lastMessage = ''
   for (const base of bases) {
     try {
       const response = await jsonRequest({
         url: `${String(base).replace(/\/+$/, '')}/billing/meter/get-user-resource`,
         method: 'POST',
-        headers: controlHeaders({ flavor: 'desktop', auth: session, deviceToken, config }),
+        headers: controlHeaders({ flavor: 'desktop', auth: session, deviceToken, config, platform }),
         body: {},
         timeoutMs: Number(config.requestTimeoutMs ?? 30_000),
         signal,
@@ -387,14 +400,16 @@ export async function growthTasks({ session, deviceToken, config = {}, signal })
  * @param {string} [input.deviceToken]
  * @param {object} [input.config]
  * @param {AbortSignal} [input.signal]
+ * @param {'codebuddy'|'workbuddy'} [input.platform] - 闭环按**账号所属平台**发：国际版只有余额与（若开启的）签到，
+ *   连登 / 抽奖 / 活跃上报是国内成长域独有的，对国际账号一律跳过而不是拿国内域名硬撞。
  */
-export async function runDailyGrowth({ session, deviceToken, config = {}, signal }) {
+export async function runDailyGrowth({ session, deviceToken, config = {}, signal, platform = 'codebuddy' }) {
   const result = { at: Date.now(), checkin: undefined, activity: undefined, redeem: [], lottery: undefined, credits: undefined, streakDays: undefined }
 
-  result.checkin = await dailyCheckin({ session, deviceToken, config, signal })
+  result.checkin = await dailyCheckin({ session, deviceToken, config, signal, platform })
   if (result.checkin.streakDays !== undefined) result.streakDays = result.checkin.streakDays
 
-  const autoGrowth = config.autoGrowth !== false
+  const autoGrowth = platform === 'codebuddy' && config.autoGrowth !== false
   if (autoGrowth) {
     const streak = await growthStreak({ session, deviceToken, config, signal })
     if (streak.ok === true) {
@@ -424,11 +439,11 @@ export async function runDailyGrowth({ session, deviceToken, config = {}, signal
     }
   }
 
-  if (config.autoActivity !== false) {
+  if (platform === 'codebuddy' && config.autoActivity !== false) {
     result.activity = await reportActivity({ session, config, signal })
   }
 
-  const balance = await userResource({ session, deviceToken, config, signal })
+  const balance = await userResource({ session, deviceToken, config, signal, platform })
   if (balance.ok === true) {
     result.credits = balance.credits
     if (balance.packages !== undefined) result.packages = balance.packages

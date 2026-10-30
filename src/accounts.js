@@ -363,8 +363,33 @@ export class AccountsStore {
     return {
       settings: this.settings,
       creditFloor: this.creditFloor > 0 ? this.creditFloor : undefined,
+      totals: this.totals(),
       accounts: this.accounts.map(account => stripEmpty(view(account))),
     }
+  }
+
+  /**
+   * 按平台汇总总积分：`{ codebuddy: {accounts, known, credits, at}, workbuddy: … }`。
+   *
+   * 只累加**已知**余额（刷新过余额或调用扣过数的账号）；`known < accounts`
+   * 说明还有账号没测过余额，合计只是部分值——页面上必须把这一点显示出来，
+   * 不能让「没刷新过的账号」被算成 0 分后冒充总额。
+   */
+  totals() {
+    const out = {}
+    for (const account of this.accounts) {
+      const route = account.route ?? 'codebuddy'
+      const bucket = out[route] ??= { accounts: 0, known: 0, credits: 0, at: undefined }
+      bucket.accounts += 1
+      const credits = Number(account.credits)
+      if (Number.isFinite(credits)) {
+        bucket.credits += credits
+        bucket.known += 1
+        const at = Number(account.creditsAt)
+        if (Number.isFinite(at) && (bucket.at === undefined || at > bucket.at)) bucket.at = at
+      }
+    }
+    return out
   }
 }
 

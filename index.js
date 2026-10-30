@@ -307,18 +307,25 @@ export function apply(ctx, config) {
   }
 
   /**
-   * 跑任务。`account` 省略即对全部启用账号跑一遍。
+   * 跑任务。`account` 省略即对全部启用账号跑一遍（每个账号按**它自己的平台**发请求：
+   * 账号池里国内、国际混着放，国际账号的 token 拿去国内计费域只会 401）。
+   * 活跃上报只对国内有意义，国际账号自动跳过并说明。
    *
    * @param {{account?: object, kind: 'checkin'|'credits'|'refresh'|'activity'}} input
    */
   async function runTask({ account, kind }) {
-    const session = sessionFor(growthRoute)
-    const targets = account !== undefined ? [account] : accounts.enabled(growthRoute)
+    const targets = account !== undefined ? [account] : accounts.enabled()
     if (targets.length === 0) return { results: [], skipped: 'no-accounts' }
     const results = []
     for (const target of targets) {
       const label = target.nickname ?? target.uid ?? target.id
+      const platform = target.route === 'workbuddy' ? 'workbuddy' : 'codebuddy'
+      if (kind === 'activity' && platform !== 'codebuddy') {
+        results.push({ id: target.id, name: label, kind, ok: false, skipped: true, message: '国际版没有活跃上报任务，已跳过' })
+        continue
+      }
       try {
+        const session = sessionFor(nameFor(platform))
         const credentials = await session.credentialsFor(target)
         if (credentials.accessToken === undefined) {
           results.push({ id: target.id, name: label, kind, ok: false, message: '没有可用凭据（请重新登录该账号）' })
@@ -332,11 +339,11 @@ export function apply(ctx, config) {
           continue
         }
         if (kind === 'credits') {
-          const balance = await userResource({ session: credentials, deviceToken, config: growthConfig })
+          const balance = await userResource({ session: credentials, deviceToken, config: growthConfig, platform })
           if (balance.ok === true) {
             accounts.update(target.id, { credits: balance.credits, creditsAt: Date.now(), creditPackages: balance.packages })
           }
-          results.push({ id: target.id, name: label, kind, ok: balance.ok === true, message: balance.message, credits: balance.credits, packages: balance.packages })
+          results.push({ id: target.id, name: label, kind, platform, ok: balance.ok === true, message: balance.message, credits: balance.credits, packages: balance.packages })
           continue
         }
         if (kind === 'activity') {
@@ -346,11 +353,11 @@ export function apply(ctx, config) {
           continue
         }
 
-        const daily = await runDailyGrowth({ session: credentials, deviceToken, config: growthConfig })
+        const daily = await runDailyGrowth({ session: credentials, deviceToken, config: growthConfig, platform })
         accounts.update(target.id, {
           ...(daily.checkin === undefined
             ? {}
-            : { lastCheckin: { at: daily.at, ok: daily.checkin.ok === true, already: daily.checkin.already === true, credit: daily.checkin.credit, message: daily.checkin.message } }),
+            : { lastCheckin: { at: daily.at, ok: daily.checkin.ok === true, already: daily.checkin.already === true, unavailable: daily.checkin.unavailable === true, credit: daily.checkin.credit, message: daily.checkin.message } }),
           ...(daily.activity === undefined ? {} : { lastActivity: { at: daily.at, ok: daily.activity.ok === true, message: daily.activity.message } }),
           ...(daily.credits === undefined ? {} : { credits: daily.credits, creditsAt: daily.at }),
           ...(daily.packages === undefined ? {} : { creditPackages: daily.packages }),
@@ -361,6 +368,7 @@ export function apply(ctx, config) {
           id: target.id,
           name: label,
           kind,
+          platform,
           ok: daily.checkin?.ok === true,
           message: daily.checkin?.message ?? '完成',
           credit: daily.checkin?.credit,

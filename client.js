@@ -54,6 +54,7 @@ window.__ModuleLoader__.load({
         exportDone: '已导出 workbuddy-accounts.json（并已复制到剪贴板）',
         exportFailed: '导出失败：{reason}',
         routeDisabled: '该路由未在 config.routes 中启用',
+        partialTotals: '未刷全',
         loginStarting: '正在获取授权链接…',
         loginWaiting: '已打开官方授权页，等待授权完成…',
         loginHint: '若浏览器没有自动打开，点下面的链接完成登录。',
@@ -137,6 +138,7 @@ window.__ModuleLoader__.load({
         exportDone: 'Exported workbuddy-accounts.json (also copied to the clipboard)',
         exportFailed: 'Export failed: {reason}',
         routeDisabled: 'This route is not in config.routes',
+        partialTotals: 'not refreshed',
         loginStarting: 'Getting the authorization link…',
         loginWaiting: 'The official authorization page is open — waiting for it to finish…',
         loginHint: 'If the browser did not open, use the link below.',
@@ -215,6 +217,7 @@ window.__ModuleLoader__.load({
 .wbk-tag { font-size: 11px; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--dsw-alias-border-l2); color: var(--dsw-alias-label-secondary); }
 .wbk-tag-active { border-color: var(--dsw-alias-state-success-primary); color: var(--dsw-alias-state-success-primary); }
 .wbk-tag-warn { border-color: var(--dsw-alias-state-warn-primary); color: var(--dsw-alias-state-warn-primary); }
+.wbk-total { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; padding-right: 18px; }
 .wbk-account { display: flex; flex-direction: column; gap: 8px; padding: 12px 0; border-top: 1px solid var(--dsw-alias-border-l1); }
 .wbk-account:first-child { border-top: none; }
 .wbk-name { font-weight: 600; }
@@ -436,7 +439,29 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'wbk-root' },
         h('div', null,
           h('p', { className: 'wbk-title' }, t('title')),
-          h('p', { className: 'wbk-sub' }, t('sub'))),
+          h('p', { className: 'wbk-sub' }, t('sub')),
+        // 总积分按平台分列：国内是国内的，国际是国际的。
+        // `known < accounts` 时标成「部分」——没刷过余额的账号不能按 0 冒充总额。
+        (() => {
+          const totals = state.totals ?? {}
+          const buckets = [
+            ['codebuddy', t('routeCn')],
+            ['workbuddy', t('routeIntl')],
+          ].filter(([key]) => totals[key] !== undefined)
+          if (buckets.length === 0) return null
+          return h('div', { className: 'wbk-card wbk-row' }, buckets.map(([key, label]) => {
+            const bucket = totals[key] ?? {}
+            const partial = (bucket.known ?? 0) < (bucket.accounts ?? 0)
+            return h('span', { className: 'wbk-total', key },
+              h('b', null, label),
+              ' ',
+              bucket.known > 0 ? bucket.credits : '—',
+              ' ',
+              t('credit'),
+              bucket.accounts !== undefined ? `（${bucket.known ?? 0}/${bucket.accounts}）` : '',
+              partial ? h('span', { className: 'wbk-tag wbk-tag-warn' }, t('partialTotals')) : null)
+          }))
+        })()),
 
         h('div', { className: 'wbk-card wbk-between' },
           h('div', { className: 'wbk-row' },
