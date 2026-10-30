@@ -284,6 +284,21 @@ export function toFailure(status, payload, retryAfterMs) {
   return failure
 }
 
+/**
+ * 这个失败是不是「账号积分/额度不足」。
+ *
+ * 上游的 402 与余额类文案（insufficient balance / 余额不足 / quota exceeded）都算。
+ * 识别到就把该账号的已知余额按 0 记账，让积分闸门立刻把它切下去——
+ * 比等下一次 400/401 再猜要准，也不浪费请求。
+ *
+ * @param {{message?: string, code?: string, status?: number}} failure
+ */
+export function isBalanceExhausted(failure) {
+  if (failure?.status === 402) return true
+  const text = String(failure?.message ?? '')
+  return /insufficient\s+(balance|credit)|quota\s+(exceeded|exhausted)|balance\s+(not\s+)?(enough|insufficient|exhausted)|余额不足|积分不足|额度不足|欠费/i.test(text)
+}
+
 /** 从上游各种错误外壳里捞出人能读的那句话。 */
 export function extractMessage(payload) {
   if (typeof payload === 'string') return payload.slice(0, 400)

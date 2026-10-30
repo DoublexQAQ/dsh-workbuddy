@@ -40,6 +40,19 @@ window.__ModuleLoader__.load({
         loadFailed: '读不到插件后端',
         retry: '重试',
         login: '登录新账号',
+        loginCn: '登录国内账号',
+        loginIntl: '登录国际版账号',
+        import: '导入 JSON',
+        importPrompt: '粘贴凭据 JSON：{ accounts: [{ route: "codebuddy"|"workbuddy", auth: { accessToken, refreshToken }, account: { uid, nickname } }] }，也接受单个 { auth, account } 或裸数组。',
+        importBadJson: 'JSON 解析失败：{reason}',
+        importDone: '已导入 {imported} 个账号（新增 {created} 个）',
+        importPartial: '已导入 {imported} 个（新增 {created}），跳过：{skipped}',
+        importFailed: '导入失败：{reason}',
+        export: '导出 JSON',
+        exportHint: '导出账号与凭据（含 token，仅本机回环接口），可直接粘回「导入 JSON」或备份',
+        exportDone: '已导出 workbuddy-accounts.json（并已复制到剪贴板）',
+        exportFailed: '导出失败：{reason}',
+        routeDisabled: '该路由未在 config.routes 中启用',
         loginStarting: '正在获取授权链接…',
         loginWaiting: '已打开官方授权页，等待授权完成…',
         loginHint: '若浏览器没有自动打开，点下面的链接完成登录。',
@@ -85,6 +98,8 @@ window.__ModuleLoader__.load({
         refreshed: '凭据已刷新',
         noteIntl: '海外 WorkBuddy 平台没有这套成长接口，本页的积分功能只作用于国内账号。',
         neverRan: '今天还没跑',
+        lowCredit: '低于 {floor}，已停用聊天',
+        floorNote: '积分闸门：已知余额低于 {floor} 的账号自动跳过并切换；全部低于则停止使用（签到回血后自动恢复）。改配置里的 creditFloor，0 关闭。',
         routeCn: '国内',
         routeIntl: '海外',
         usageLast: '上次消耗 {credit} 积分（{model}）',
@@ -107,6 +122,19 @@ window.__ModuleLoader__.load({
         loadFailed: 'Cannot reach the plugin backend',
         retry: 'Retry',
         login: 'Add account',
+        loginCn: 'Add domestic account',
+        loginIntl: 'Add international account',
+        import: 'Import JSON',
+        importPrompt: 'Paste credential JSON: { accounts: [{ route: "codebuddy"|"workbuddy", auth: { accessToken, refreshToken }, account: { uid, nickname } }] } — a single { auth, account } or a bare array also works.',
+        importBadJson: 'JSON parse failed: {reason}',
+        importDone: 'Imported {imported} account(s) ({created} new)',
+        importPartial: 'Imported {imported} ({created} new); skipped: {skipped}',
+        importFailed: 'Import failed: {reason}',
+        export: 'Export JSON',
+        exportHint: 'Export accounts and credentials (includes tokens; loopback-only route). Paste it back into Import, or keep it as a backup.',
+        exportDone: 'Exported workbuddy-accounts.json (also copied to the clipboard)',
+        exportFailed: 'Export failed: {reason}',
+        routeDisabled: 'This route is not in config.routes',
         loginStarting: 'Getting the authorization link…',
         loginWaiting: 'The official authorization page is open — waiting for it to finish…',
         loginHint: 'If the browser did not open, use the link below.',
@@ -152,6 +180,8 @@ window.__ModuleLoader__.load({
         refreshed: 'Token refreshed',
         noteIntl: 'The overseas WorkBuddy platform has no growth domain; the points features here apply to domestic accounts only.',
         neverRan: 'Not run yet today',
+        lowCredit: 'below {floor}, chat disabled',
+        floorNote: 'Credit floor: accounts whose known balance is under {floor} are skipped and the pool rotates; when all are under, the route stops (check-in still restores them). Set config.creditFloor; 0 disables.',
         routeCn: 'Domestic',
         routeIntl: 'Overseas',
         usageLast: 'Last call used {credit} credits ({model})',
@@ -289,11 +319,11 @@ window.__ModuleLoader__.load({
         [load, t],
       )
 
-      const startLogin = useCallback(async () => {
+      const startLogin = useCallback(async route => {
         setBusy('login')
         setMessage(undefined)
         try {
-          const started = await call('/login', { body: {} })
+          const started = await call('/login', { body: { route } })
           setLogin({ ...started })
           if (pollRef.current !== undefined) clearInterval(pollRef.current)
           pollRef.current = setInterval(async () => {
@@ -333,6 +363,66 @@ window.__ModuleLoader__.load({
 
       const accounts = state.accounts ?? []
       const settings = state.settings ?? {}
+      // 两条路由的**实际注册名**由 Host 下发（routeNames 改名后跟着变）；按钮仍用平台名点名。
+      const routeNames = state.routeNames ?? {}
+      const cnAvailable = routeNames.codebuddy !== undefined
+      const intlAvailable = routeNames.workbuddy !== undefined
+
+      const doImport = async () => {
+        const text = window.prompt(t('importPrompt'))
+        if (typeof text !== 'string' || text.trim() === '') return
+        let parsed
+        try {
+          parsed = JSON.parse(text)
+        } catch (cause) {
+          setMessage({ tone: 'err', text: t('importBadJson', { reason: cause instanceof Error ? cause.message : String(cause) }) })
+          return
+        }
+        setMessage({ tone: 'ok', text: t('working') })
+        try {
+          const payload = await call('/import', { body: parsed })
+          const skipped = payload?.skipped ?? []
+          setMessage({
+            tone: skipped.length === 0 ? 'ok' : 'warn',
+            text: t(skipped.length === 0 ? 'importDone' : 'importPartial', {
+              imported: payload?.imported ?? 0,
+              created: payload?.created ?? 0,
+              skipped: skipped.map(row => `${row.name}：${row.reason}`).join('；'),
+            }),
+          })
+          await load()
+        } catch (cause) {
+          setMessage({ tone: 'err', text: t('importFailed', { reason: cause instanceof Error ? cause.message : String(cause) }) })
+        }
+      }
+
+      // 导出：形状与导入一致，导出的文件可以粘回「导入 JSON」或拷给别家网关 / 做备份。
+      const doExport = async () => {
+        setMessage(undefined)
+        try {
+          const payload = await call('/export')
+          const text = JSON.stringify(payload, undefined, 2)
+          const name = 'workbuddy-accounts.json'
+          try {
+            const file = new File([text], name, { type: 'application/json' })
+            if (navigator.canShare?.({ files: [file] }) === true) {
+              await navigator.share({ files: [file], title: name })
+              setMessage({ tone: 'ok', text: t('exportDone') })
+              return
+            }
+          } catch { /* 分享不可用就退回下载 */ }
+          const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }))
+          const anchor = document.createElement('a')
+          anchor.href = url
+          anchor.download = name
+          anchor.click()
+          URL.revokeObjectURL(url)
+          await navigator.clipboard?.writeText(text).catch(() => {})
+          setMessage({ tone: 'ok', text: t('exportDone') })
+        } catch (cause) {
+          setMessage({ tone: 'err', text: t('exportFailed', { reason: cause instanceof Error ? cause.message : String(cause) }) })
+        }
+      }
 
       return h('div', { className: 'wbk-root' },
         h('div', null,
@@ -343,9 +433,26 @@ window.__ModuleLoader__.load({
           h('div', { className: 'wbk-row' },
             h('button', {
               className: 'wbk-btn wbk-btn-primary',
+              disabled: busy !== undefined || cnAvailable !== true,
+              onClick: () => void startLogin('codebuddy'),
+            }, busy === 'login' ? t('loginStarting') : t('loginCn')),
+            h('button', {
+              className: 'wbk-btn',
+              disabled: busy !== undefined || intlAvailable !== true,
+              title: intlAvailable === true ? undefined : t('routeDisabled'),
+              onClick: () => void startLogin('workbuddy'),
+            }, busy === 'login' ? t('loginStarting') : t('loginIntl')),
+            h('button', {
+              className: 'wbk-btn',
               disabled: busy !== undefined,
-              onClick: () => void startLogin(),
-            }, busy === 'login' ? t('loginStarting') : t('login')),
+              onClick: () => void doImport(),
+            }, t('import')),
+            h('button', {
+              className: 'wbk-btn',
+              disabled: busy !== undefined || accounts.length === 0,
+              title: t('exportHint'),
+              onClick: () => void doExport(),
+            }, t('export')),
             h('button', {
               className: 'wbk-btn',
               disabled: busy !== undefined || accounts.length === 0,
@@ -386,6 +493,8 @@ window.__ModuleLoader__.load({
 
         h('div', { className: 'wbk-card' },
           h('p', { className: 'wbk-title' }, t('accounts')),
+          // 有闸门时说明一次规则，用户看见「低于 X 自动切」不是猜的。
+          (state.creditFloor ?? 0) > 0 ? h('p', { className: 'wbk-sub' }, t('floorNote', { floor: state.creditFloor })) : null,
           accounts.length === 0 ? h('p', { className: 'wbk-sub' }, t('empty')) : null,
           accounts.map(account => h('div', { className: 'wbk-account', key: account.id },
             h('div', { className: 'wbk-between' },
@@ -413,6 +522,8 @@ window.__ModuleLoader__.load({
               h('span', { className: 'wbk-tag' }, account.route === 'workbuddy' ? t('routeIntl') : t('routeCn')),
               h('span', { className: 'wbk-mono' }, `${t('uid')} ${account.uid ?? '—'}`),
               h('span', null, `${t('credit')} ${account.credits === undefined ? '—' : account.credits}`),
+              // 余额低于闸门：模型车道已经不再用它（签到照常）。
+              account.creditLow === true ? h('span', { className: 'wbk-tag wbk-tag-warn' }, t('lowCredit', { floor: state.creditFloor ?? '?' })) : null,
               h('span', null, `${t('streak')} ${account.streakDays ?? '—'}`),
               h('span', { className: account.daily?.checkin !== undefined ? 'wbk-msg-ok' : '' },
                 `${t('todayCheckin')}：${account.daily?.checkin !== undefined ? t('yes') : t('no')}`)),

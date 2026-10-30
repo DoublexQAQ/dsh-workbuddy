@@ -27,10 +27,30 @@ git clone https://github.com/DoublexQAQ/dsh-workbuddy.git
 
 ## 第一次使用
 
-1. **登录**：设置 → WorkBuddy 账号 → 「登录新账号」→ 浏览器里完成一次官方授权。
-   要多个账号就再点一次，列表里可以随时切换「当前账号」。
-2. **选模型**：设置 → 模型，选 `codebuddy` 路由下的模型（海外的选 `workbuddy`）。
-3. **想白嫖就先挑免费的**：`Hy3`、`Step-5-Preview`（名字里就写着「免费」）。
+1. **登录**：设置 → WorkBuddy 账号 → 「登录国内账号」或「登录国际版账号」
+   → 浏览器里完成一次官方授权。要多个账号就再点一次，列表里可以随时切换「当前账号」。
+   两条路由的账号池是**分开**的：国内模型用国内账号，海外模型用海外账号。
+2. **也可以直接导入**：已有别家网关的 session 文件？点「导入 JSON」粘贴即可，形状：
+
+   ```jsonc
+   {
+     "accounts": [
+       {
+         "route": "codebuddy",            // 或 "workbuddy"，缺省国内
+         "auth": { "accessToken": "eyJ…", "refreshToken": "eyJ…" },
+         "account": { "uid": "…", "nickname": "我的号" }
+       }
+     ]
+   }
+   ```
+
+   单个 `{ auth, account }`、裸数组、别家网关的 `~/.codebuddy-session.json` 原样、
+   顶层直接给 `{ accessToken, refreshToken }`、以及蛇形键（`access_token` / `user_id`）
+   和路由别名（`VSCode`→国内、`workbuddy-ai`→海外）都认；缺 token / 路由未启用的行
+   会被跳过并点名原因。配套有「导出 JSON」按钮，导出的文件能直接粘回「导入 JSON」，
+   也能拷给别家网关或做备份。
+3. **选模型**：设置 → 模型，选 `codebuddy` 路由下的模型（海外的选 `workbuddy`）。
+4. **想白嫖就先挑免费的**：`Hy3`、`Step-5-Preview`（名字里就写着「免费」）。
 
 积分功能只作用于**国内账号**；海外账号用来跑模型。
 
@@ -61,6 +81,18 @@ hunyuan-2.0-thinking · ×0.04   Default · ×2.2
 - **不会重复**：每天只跑一次，重启也不会重复触发；上游若回「今天已签到」，插件判成「已领过」而不是失败
 - 想手动：列表里每个账号有「立即签到 / 刷新余额 / 刷新凭据」，顶部有「全部签到」
 
+### 低余额自动切换（积分闸门）
+
+默认开启：某个账号的**已知余额低于 100 积分**时，聊天调用不再用它，自动切到同路由里
+余额够的下一个账号；**所有账号都低于 100 时该路由直接停用并报错**（错误里点名每个账号
+的余额），等每日签到回血或充值后自动恢复。几点说明：
+
+- 「已知余额」= 刷新过余额或调用扣过数的账号；从没测过余额的账号不会被闸门误伤
+- 闸门**只闸聊天调用**：签到 / 余额刷新照常跑——那正是低余额账号回血的路径
+- 上游报 402 / 余额不足类错误时，该账号余额立即按 0 记账，下一调用即被切走
+- 改阈值：`creditFloor: 50`；彻底关闭：`creditFloor: 0`；设置页账号列表里低余额账号带
+  「低于 100，已停用聊天」标记
+
 时间点与开关都能改（见下）。
 
 ## 常用设置
@@ -75,6 +107,7 @@ hunyuan-2.0-thinking · ×0.04   Default · ×2.2
     autoLogin: true                  # 凭据失效时自动开浏览器授权
     openBrowser: true                # 设 false 则只在设置页显示授权链接
     failover: true                   # 当前账号被拒时自动切下一个
+    creditFloor: 100                   # 积分闸门：低于该值的账号不再用于聊天（0 关闭）
     autoCheckin: true                # 每天自动签到
     checkinHours: [9, 21]            # 签到时点（北京时间，整点）
     autoActivity: true               # 每天自动上报活跃（点亮连登）
@@ -95,7 +128,7 @@ hunyuan-2.0-thinking · ×0.04   Default · ×2.2
 两条路由的账号是**互相隔离**的：国内账号不能给海外路由用。如果你选的是 `workbuddy`（海外）
 下面的模型，需要单独登一个海外账号；反之亦然。
 
-**报 `HTTP 400 · Illegal API invocation from an unapproved channel`
+**报 `HTTP 400 · Illegal API invocation from an unapproved channel`**
 上游对 system prompt 有内容安全策略：某些宿主注入的系统提示（长合规模板、
 敏感话题措辞）会被逐字命中并拦在推理之前——拦的是**请求内容**，不是账号也不是凭据。
 插件已内建处理：撞到这条时，自动把 system 换成内置中性提示词**同请求内重试一次**，

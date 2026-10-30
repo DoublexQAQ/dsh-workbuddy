@@ -24,6 +24,7 @@ import { API_PREFIX, LoginCoordinator, createApiHandler } from './src/api.js'
 import { WorkBuddyAdapter } from './src/adapter.js'
 import { ModelCatalog, displayDescription, displayName } from './src/catalog.js'
 import { IdentityStore } from './src/identity.js'
+import { normalizeImportInput, prepareImportRows } from './src/import.js'
 import { SessionStore, unwrapAuth } from './src/session.js'
 import { reportActivity, runDailyGrowth, userResource } from './src/growth.js'
 import { DailyScheduler, cstParts } from './src/schedule.js'
@@ -57,6 +58,12 @@ const DEFAULTS = Object.freeze({
   autoRefresh: true,
   /** 当前账号被拒时自动切到下一个启用账号。 */
   failover: true,
+  /**
+   * 模型车道的积分下限：已知余额低于这个数的账号**不再用于聊天调用**，
+   * 自动切到同路由里够的账号；全都低于就报错停用，等签到回血或充值自动恢复。
+   * `0` = 关闭闸门。只闸模型车道——每日签到 / 余额刷新照常跑（那正是回血途径）。
+   */
+  creditFloor: 100,
   contextWindow: undefined,
   maxTokens: undefined,
   stateDir: undefined,
@@ -131,6 +138,7 @@ export function apply(ctx, config) {
   const accounts = new AccountsStore({
     file: path.join(resolvedStateDir, 'accounts.json'),
     logger,
+    creditFloor: Number(settings.creditFloor ?? 0),
     settings: {
       autoCheckin: settings.autoCheckin !== false,
       checkinHours: settings.checkinHours,
@@ -147,9 +155,11 @@ export function apply(ctx, config) {
     if (store === undefined) {
       store = new SessionStore({ profile: profileFor(route), config: settings, logger })
       store.attachAccounts(accounts)
-      // 登录成功 -> 并入池子（**带上路由**：账号是平台相关的资产）。这是设置页登录的落点。
+      // 登录成功 -> 并入池子。**池子按平台名（codebuddy / workbuddy）分组**——
+      // 账号是平台相关的资产，注册路由改名（routeNames）不影响池子归属。
       store.onLoginSuccess = ({ auth, account, route }) => {
-        const { account: row, created } = accounts.add({ auth, account, route: route ?? growthRoute })
+        const { account: row, created } = accounts.add({ auth, account, route: route ?? GROWTH_PLATFORM })
+        invalidateCatalog()
         if (created) logger.info?.(`workbuddy: 已登录并加入账号池：${row.nickname ?? row.uid ?? row.id}（${row.route}）`)
       }
       sessions.set(route, store)
@@ -191,6 +201,10 @@ export function apply(ctx, config) {
   }
 
   const catalog = new ModelCatalog({ ttlMs: Number(settings.catalogTtlMs ?? 10 * 60_000), logger })
+  /** 账号集变化（登录 / 导入 / 移除）后清掉目录缓存：倍率是按账号权限下发的。 */
+  function invalidateCatalog() {
+    catalog.cache.clear()
+  }
   // 站点专属指纹（某台机器装的人格 / 注入文案）走**本机状态目录**，不进仓库也不进 patch：
   // `~/.dsh-workbuddy/sanitize.json` -> `{ extraRules: [...], words: [...] }`。
   const localSanitize = readSanitizeOverride(resolvedStateDir, logger)
@@ -376,24 +390,60 @@ export function apply(ctx, config) {
   scheduler.start(ctx)
 
   // ── 设置页的同源接口 ────────────────────────────────────────────────────────
-  const login = new LoginCoordinator({
-    logger,
-    begin: async ({ onProgress }) => sessionFor(growthRoute).login({ onProgress }),
-  })
+  /** 每个**已启用**的平台路由一个登录协调器；页面用平台名（codebuddy / workbuddy）点名。 */
+  const logins = {}
+  for (const platform of ALL_ROUTES) {
+    const route = nameFor(platform)
+    if (routes.includes(route) !== true) continue
+    logins[platform] = new LoginCoordinator({
+      logger,
+      begin: async ({ onProgress }) => sessionFor(route).login({ onProgress }),
+    })
+  }
+
+  /**
+   * 导入 JSON 凭据（页面粘贴 / 别家网关的 session 文件都行）。
+   *
+   * 形状归一全在 `src/import.js`：本插件导出的 accounts.json、别家网关的
+   * `{auth, account}`、裸数组、蛇形键变体都收。校验从严：没有 accessToken 的行
+   * 被**拒绝**并点名原因——一个没有 token 的「账号」只会在第一次调用时才炸。
+   *
+   * @param {unknown} body - 页面 POST 来的整个 JSON
+   * @returns {{imported: number, created: number, skipped: object[]}}
+   */
+  function importAccounts(body) {
+    const normalized = normalizeImportInput(body)
+    if (normalized.error !== undefined) throw new Error(normalized.error)
+    if (normalized.rows.length > 50) throw new Error('一次最多导入 50 个账号')
+    const { accepts, skipped } = prepareImportRows(normalized.rows, platform => logins[platform] !== undefined)
+    let created = 0
+    for (const row of accepts) {
+      const outcome = accounts.add({ auth: row.auth, account: row.account, route: nameFor(row.route) })
+      if (outcome.created) created += 1
+      logger.info?.(`workbuddy: 导入账号 ${row.account.nickname ?? row.account.uid ?? row.account.accessToken.slice(0, 8)}…（${row.route}）`)
+    }
+    return { imported: accepts.length, created, skipped }
+  }
 
   /**
    * 设置页用的模型目录视图（含免费标记与倍率）。
    *
+   * 倍率是按账号权限下发的，所以用「本路由的当前账号」去读；国内路由没有账号时
+   * 退到任意一条有账号的路由——页面至少能告诉用户当前账号能看到什么。
+   *
    * @param {{force?: boolean}} [options]
    */
   async function catalogView(options = {}) {
-    const route = growthRoute
+    const route = accounts.enabled(growthRoute).length > 0
+      ? growthRoute
+      : routes.find(candidate => accounts.enabled(candidate).length > 0)
+    if (route === undefined) return { rows: [], error: '还没有登录账号', at: Date.now() }
     const account = accounts.active(route)
-    if (account === undefined) return { rows: [], error: '还没有登录账号', at: Date.now() }
     try {
       const credentials = await sessionFor(route).credentialsFor(account)
       const fetched = await catalog.get({ route, account, auth: credentials, config: settings, force: options.force === true })
       return {
+        route,
         at: fetched.at,
         error: fetched.error,
         rows: (fetched.rows ?? []).map(row => ({
@@ -410,7 +460,7 @@ export function apply(ctx, config) {
         })),
       }
     } catch (error) {
-      return { rows: [], error: error instanceof Error ? error.message : String(error), at: Date.now() }
+      return { route, rows: [], error: error instanceof Error ? error.message : String(error), at: Date.now() }
     }
   }
 
@@ -419,7 +469,17 @@ export function apply(ctx, config) {
       const dispose = scoped.webServer.register({
         kind: 'prefix',
         path: API_PREFIX,
-        handler: createApiHandler({ accounts, login, runTask, catalog: catalogView, logger, config: settings }),
+        handler: createApiHandler({
+          accounts,
+          logins,
+          routeNameFor: nameFor,
+          runTask,
+          catalog: catalogView,
+          importAccounts,
+          invalidate: invalidateCatalog,
+          logger,
+          config: settings,
+        }),
       })
       ctx.effect(() => () => dispose(), 'dsh-workbuddy: settings api')
     })

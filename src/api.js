@@ -18,8 +18,8 @@
 import { cstParts } from './schedule.js'
 
 export const API_PREFIX = '/api/workbuddy'
-const MAX_BODY_BYTES = 64 * 1024
-
+// 导入 50 个账号的 JWT（每个约 1.5KB）会超过 64KB；上限放宽到 512KB。
+const MAX_BODY_BYTES = 512 * 1024
 /** 只有回环来源的请求才被受理。 */
 export function isLoopbackRequest(req) {
   const host = String(req.headers?.host ?? '')
@@ -59,11 +59,13 @@ async function readBody(req) {
  * 登录尝试登记处：一次授权对应一个 `state`，设置页轮询它的状态。
  *
  * 授权在**浏览器**里完成，所以这里只负责「起一次、记着、报状态」，不阻塞任何请求。
+ * 每个平台路由（codebuddy / workbuddy）各持一个实例——`start` 不带路由信息，
+ * 路由的选择发生在处理器里。
  */
 export class LoginCoordinator {
   /**
    * @param {object} input
-   * @param {(options: {onProgress: Function}) => Promise<{auth: object, account: object}>} input.begin - 由 index.js 提供的真实登录流程
+   * @param {(options: {onProgress: Function}) => Promise<{auth: object, account: object}>} input.begin - 由 index.js 提供的真实登录流程（已绑定到某个路由）
    * @param {{debug?: Function, warn?: Function}} [input.logger]
    */
   constructor({ begin, logger }) {
@@ -137,14 +139,23 @@ export class LoginCoordinator {
  *
  * @param {object} deps
  * @param {import('./accounts.js').AccountsStore} deps.accounts
- * @param {LoginCoordinator} deps.login
+ * @param {Record<string, LoginCoordinator>} deps.logins - 每个平台路由一个协调器（codebuddy / workbuddy）
+ * @param {(platform: string) => string} [deps.routeNameFor] - 平台 -> 实际注册路由名（routeNames 覆盖后）
  * @param {(options: {account?: object, kind: 'checkin'|'credits'|'refresh'}) => Promise<object>} deps.runTask
  * @param {(options?: {force?: boolean}) => Promise<{rows: object[], error?: string, at: number}>} [deps.catalog]
+ * @param {(rows: object[]) => {imported: number, skipped: object[]}} [deps.importAccounts] - 导入 JSON 凭据
+ * @param {() => void} [deps.invalidate] - 账号集变化后清缓存（目录/路由可用性）
  * @param {object} [deps.logger]
  * @param {object} [deps.config]
  */
 export function createApiHandler(deps) {
-  const { accounts, login, runTask, catalog, logger, config } = deps
+  const { accounts, logins = {}, routeNameFor = platform => platform, runTask, catalog, importAccounts, invalidate, logger, config } = deps
+
+  /** 请求里带 `route` 就用对应协调器；缺省用国内（历史行为）。 */
+  const coordinatorFor = value => {
+    const platform = value === 'workbuddy' || value === 'codebuddy' ? value : 'codebuddy'
+    return { platform, coordinator: logins[platform] }
+  }
 
   return async function handle(req, res) {
     try {
@@ -165,14 +176,23 @@ export function createApiHandler(deps) {
         sendJson(res, 200, {
           ...accounts.view(),
           now: cstParts(),
-          route: 'codebuddy',
+          // 告诉页面两条路由各自的**实际注册名**（routeNames 改名后 UI 要跟着走）。
+          routeNames: { codebuddy: routeNameFor('codebuddy'), workbuddy: routeNameFor('workbuddy') },
           autoLogin: config?.autoLogin !== false,
         })
         return
       }
 
       if (method === 'GET' && route === '/login/status') {
-        sendJson(res, 200, login.status(url.searchParams.get('state') ?? ''))
+        // 状态轮询不带路由信息：跨协调器查同一个 state。
+        for (const coordinator of Object.values(logins)) {
+          const status = coordinator?.status(url.searchParams.get('state') ?? '')
+          if (status.status !== 'unknown') {
+            sendJson(res, 200, status)
+            return
+          }
+        }
+        sendJson(res, 200, { status: 'unknown' })
         return
       }
 
@@ -186,27 +206,57 @@ export function createApiHandler(deps) {
         return
       }
 
+      // 导出账号 JSON：与导入同一形状，方便拷给别家 / 备份。凭据字段带不带由 ?withTokens=1 决定，
+      // 默认**带**（这个接口只在回环受理，导出的就是完整可迁移的账号数据）。
+      if (method === 'GET' && route === '/export') {
+        sendJson(res, 200, accounts.exportJson({ withTokens: url.searchParams.get('withTokens') !== '0' }))
+        return
+      }
+
       const body = await readBody(req)
 
       if (method === 'POST' && route === '/login') {
-        const started = await login.start()
-        sendJson(res, 200, started)
+        const { platform, coordinator } = coordinatorFor(body.route)
+        if (coordinator === undefined) {
+          sendJson(res, 400, { error: `路由 ${platform} 未启用（config.routes 里没有它）` })
+          return
+        }
+        const started = await coordinator.start()
+        sendJson(res, 200, { ...started, route: platform })
         return
       }
 
       if (method === 'POST' && route === '/login/cancel') {
-        sendJson(res, 200, { cancelled: login.cancel(String(body.state ?? '')) })
+        let cancelled = false
+        for (const coordinator of Object.values(logins)) {
+          if (coordinator?.cancel(String(body.state ?? '')) === true) cancelled = true
+        }
+        sendJson(res, 200, { cancelled })
+        return
+      }
+
+      // 导入 JSON 凭据：形状归一交给 deps.importAccounts（它收到的是整个请求体）。
+      if (method === 'POST' && route === '/import') {
+        if (importAccounts === undefined) {
+          sendJson(res, 400, { error: 'import unavailable' })
+          return
+        }
+        const outcome = await importAccounts(body)
+        invalidate?.()
+        sendJson(res, 200, { ok: true, ...outcome, ...accounts.view() })
         return
       }
 
       if (method === 'POST' && route === '/activate') {
         const ok = accounts.activate(String(body.id ?? ''))
+        invalidate?.()
         sendJson(res, ok ? 200 : 404, ok ? { ok: true, ...accounts.view() } : { error: 'account not found' })
         return
       }
 
       if (method === 'POST' && route === '/remove') {
         const ok = accounts.remove(String(body.id ?? ''))
+        invalidate?.()
         sendJson(res, ok ? 200 : 404, ok ? { ok: true, ...accounts.view() } : { error: 'account not found' })
         return
       }

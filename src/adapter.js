@@ -18,7 +18,7 @@
  * @module src/adapter.js
  */
 
-import { buildHeaders } from './identity.js'
+import { buildHeaders, isBalanceExhausted } from './identity.js'
 import { displayDescription, displayName } from './catalog.js'
 import { DegradeWindow, isSecurityRejection, neutralizeChatBody } from './prompt.js'
 import { openStream, TransportError } from './http.js'
@@ -254,15 +254,29 @@ export class WorkBuddyAdapter {
     // 没有账号是**最常见的「用不了」**：给一句能照着做的错误，而不是让上游回 401。
     // （账号按路由隔离：国内账号不能给海外路由用，反之亦然。）
     const accounts = this.deps.accounts
-    if (accounts !== undefined && accounts.enabled(provider).length === 0) {
-      const others = accounts.all().length
-      yield errorChunk(
-        others === 0
-          ? `还没有登录账号：打开「设置 → WorkBuddy 账号」登录一个（当前路由 ${profile.label}）`
-          : `路由 ${profile.label} 下没有账号：你登录的 ${others} 个账号属于另一个平台，请在这个路由下也登录一个`,
-        'CREDENTIAL',
-      )
-      return
+    if (accounts !== undefined) {
+      const picked = accounts.pickForModel(provider)
+      if (picked.account === undefined) {
+        const others = accounts.all().length
+        if (picked.allDrained === true) {
+          // 全部账号余额都低于下限：停止使用，点名每个账号的余额，用户自己去充值/等签到回血。
+          const detail = picked.drained
+            .map(row => `${row.nickname ?? row.uid ?? row.id}：${row.credits}`)
+            .join('，')
+          yield errorChunk(
+            `所有 ${profile.label} 账号的积分都已低于 ${accounts.creditFloor}，本路由停止使用（${detail}）。等每日签到回血或充值后自动恢复。`,
+            'CLIENT',
+          )
+        } else {
+          yield errorChunk(
+            others === 0
+              ? `还没有登录账号：打开「设置 → WorkBuddy 账号」登录一个（当前路由 ${profile.label}）`
+              : `路由 ${profile.label} 下没有账号：你登录的 ${others} 个账号属于另一个平台，请在这个路由下也登录一个`,
+            'CREDENTIAL',
+          )
+        }
+        return
+      }
     }
 
     let credentials
@@ -418,6 +432,15 @@ export class WorkBuddyAdapter {
         this.logger.debug?.('workbuddy: retried once after a credential rejection')
         yield* this.runStream({ ...options, retryAfterAuth: true })
         return
+      }
+      // 上游点名「积分/额度不足」（402 或余额文案）：这个账号的已知余额直接归零，
+      // 于是下一次调用就会被积分闸门切到别的账号——不需要再猜，也不浪费请求。
+      if (this.deps.accounts !== undefined && isBalanceExhausted(failure)) {
+        const drainedAccount = this.deps.accounts.active(provider)
+        if (drainedAccount !== undefined && Number.isFinite(Number(drainedAccount.credits))) {
+          this.deps.accounts.update(drainedAccount.id, { credits: 0, creditsAt: Date.now(), lastError: { at: Date.now(), message: failure.message } })
+          this.logger.warn?.(`workbuddy: 上游报 ${drainedAccount.nickname ?? drainedAccount.id} 额度不足，已按 0 记账并交给积分闸门切换`)
+        }
       }
       yield { type: 'finish', reason: { kind: 'error', failure } }
     }

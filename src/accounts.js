@@ -43,14 +43,26 @@ export class AccountsStore {
    * @param {string} input.file
    * @param {{debug?: Function, warn?: Function, info?: Function}} [input.logger]
    * @param {object} [input.settings] - 每日任务的初始设置（来自插件 config）
+   * @param {number} [input.creditFloor] - 模型车道的积分下限：已知余额低于它的账号**不参与
+   *   聊天调用**（自动切到够的账号；全都不够就停用报错）。`0` = 关闭。
+   *   只闸模型车道：每日签到 / 余额刷新照常跑——那正是低积分账号回血的途径。
    */
-  constructor({ file, logger, settings = {} }) {
+  constructor({ file, logger, settings = {}, creditFloor = 0 }) {
     this.file = file
     this.logger = logger ?? {}
     this.settings = { ...DEFAULT_DAILY_SETTINGS, ...settings }
+    const floor = Number(creditFloor)
+    this.creditFloor = Number.isFinite(floor) && floor > 0 ? floor : 0
     /** @type {Array<object>} */
     this.accounts = []
     this.load()
+  }
+
+  /** 该账号的**已知**余额是否低于下限。未测过（undefined）不算不足。 */
+  belowFloor(account) {
+    if (this.creditFloor === 0) return false
+    const credits = Number(account?.credits)
+    return Number.isFinite(credits) && credits < this.creditFloor
   }
 
   load() {
@@ -182,10 +194,14 @@ export class AccountsStore {
     return true
   }
 
-  /** 轮换到同路由的下一个启用账号（故障转移用）。返回新当前账号。 */
+  /** 轮换到同路由的下一个启用账号（故障转移用）。返回新当前账号。
+   *
+   * 有积分闸门时优先在**达标**账号里轮换——否则「凭据坏了切号」会切到一个
+   * 本来就因余额被停用的账号，白撞一次 400/402。
+   */
   rotate(from) {
     if (from === undefined) return undefined
-    const pool = this.enabled(from.route)
+    const pool = this.creditFloor > 0 && this.usable(from.route).length > 0 ? this.usable(from.route) : this.enabled(from.route)
     if (pool.length <= 1) return undefined
     const index = pool.findIndex(account => account.id === from.id)
     const next = pool[(index + 1 + pool.length) % pool.length]
@@ -208,6 +224,44 @@ export class AccountsStore {
     if (account === undefined) return
     account.daily = { ...(account.daily ?? {}), [kind]: date }
     this.save()
+  }
+
+  /**
+   * 模型车道可用的账号：启用、且（下限开启时）已知余额不低于下限。
+   *
+   * 与 `enabled()` 的区别只在于余额闸门——积分任务仍然用 `enabled()`，
+   * 因为「刷新余额」正是低余额账号恢复参与资格的路径。
+   *
+   * @param {string} [route]
+   */
+  usable(route) {
+    return this.enabled(route).filter(account => !this.belowFloor(account))
+  }
+
+  /**
+   * 模型车道取当前账号：当前账号仍达标就用它；不达标就**自动切换**到
+   * 同路由内下一个达标的账号（并把切换写进池子——用户下次看到的就是新当前）。
+   *
+   * @param {string} [route]
+   * @returns {{account?: object, allDrained: boolean, drained: object[]}}
+   *  - `account`：可用的当前账号（达标时）
+   *  - `allDrained`：池子里有账号、但**全部**低于下限
+   *  - `drained`：被闸门挡住的账号列表（供错误信息点名）
+   */
+  pickForModel(route) {
+    const pool = this.enabled(route)
+    const drained = pool.filter(account => this.belowFloor(account))
+    const healthy = pool.filter(account => !this.belowFloor(account))
+    if (healthy.length === 0) {
+      return { allDrained: pool.length > 0, drained }
+    }
+    const current = healthy.find(account => account.active === true) ?? healthy[0]
+    if (current.active !== true) {
+      for (const account of this.accounts) if (account.route === current.route) account.active = account.id === current.id
+      this.save()
+      this.logger.info?.(`workbuddy: 当前账号余额低于 ${this.creditFloor}，模型车道已切到 ${current.nickname ?? current.uid ?? current.id}`)
+    }
+    return { account: current, allDrained: false, drained }
   }
 
   /**
@@ -251,6 +305,37 @@ export class AccountsStore {
   }
 
   /**
+   * 导出账号 JSON（设置页的「导出 JSON」按钮）。
+   *
+   * 形状与导入一致（`{ accounts: [{ route, uid, nickname, auth }] }`）：导出的文件
+   * 可以直接粘回「导入 JSON」，也能拷给别家网关或做备份。默认**带凭据**——这个
+   * 接口只在回环受理，导出的本来就是完整可迁移的账号数据；`withTokens: false`
+   * 时 auth 只留一个存在性标记。
+   *
+   * @param {{withTokens?: boolean}} [options]
+   */
+  exportJson({ withTokens = true } = {}) {
+    return {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      accounts: this.accounts.map(account => ({
+        route: account.route ?? 'codebuddy',
+        uid: account.uid,
+        nickname: account.nickname,
+        enterpriseId: account.enterpriseId,
+        domain: account.domain ?? account.auth?.domain,
+        auth: withTokens === true
+          ? {
+              accessToken: account.auth?.accessToken,
+              refreshToken: account.auth?.refreshToken,
+              expiresAt: account.auth?.expiresAt,
+            }
+          : { present: account.auth?.accessToken !== undefined && account.auth.accessToken !== '' },
+      })),
+    }
+  }
+
+  /**
    * 给浏览器/模型看的视图：**绝不包含任何 token 字段**。
    */
   view() {
@@ -261,6 +346,7 @@ export class AccountsStore {
       nickname: account.nickname ?? null,
       active: account.active === true,
       enabled: account.enabled !== false,
+      creditLow: this.belowFloor(account),
       expiresAt: account.auth?.expiresAt ?? null,
       hasRefreshToken: typeof account.auth?.refreshToken === 'string' && account.auth.refreshToken !== '',
       credits: account.credits,
@@ -276,6 +362,7 @@ export class AccountsStore {
     // 刻意不返回 null 字段：浏览器侧只要按「有/没有」判断就绝不会踩到 null.ok 这类崩溃。
     return {
       settings: this.settings,
+      creditFloor: this.creditFloor > 0 ? this.creditFloor : undefined,
       accounts: this.accounts.map(account => stripEmpty(view(account))),
     }
   }
