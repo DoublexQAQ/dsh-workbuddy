@@ -266,6 +266,10 @@ window.__ModuleLoader__.load({
       const [models, setModels] = useState(undefined)
       const [hours, setHours] = useState('')
       const [activityHours, setActivityHours] = useState('')
+      // ⚠️ 所有 hook 必须在下面的提前 return 之前声明完：React 按调用顺序匹配 hook，
+      // 若某个 useState 落在 `return` 之后，首次渲染（state 未就绪提前返回）少跑一个 hook，
+      // 数据到齐后再渲染又多一个 → Minified React error #310，整个设置页白屏。
+      const [importDraft, setImportDraft] = useState(undefined)
       const pollRef = useRef(undefined)
 
       const load = useCallback(async () => {
@@ -370,8 +374,6 @@ window.__ModuleLoader__.load({
       const routeNames = state.routeNames ?? {}
       const cnAvailable = routeNames.codebuddy !== undefined
       const intlAvailable = routeNames.workbuddy !== undefined
-
-      const [importDraft, setImportDraft] = useState(undefined)
 
       const submitImport = async () => {
         const text = String(importDraft ?? '').trim()
