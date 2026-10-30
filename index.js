@@ -49,7 +49,8 @@ const DEFAULTS = Object.freeze({
   enterpriseId: undefined,
   autoLogin: true,
   openBrowser: true,
-  loginTimeoutMs: 180_000,
+  /** 授权等待放宽到 5 分钟：浏览器登录 + 扫码 + 确认，3 分钟太容易掐表。 */
+  loginTimeoutMs: 300_000,
   loginPollIntervalMs: 1_500,
   loginOnStart: false,
   requestTimeoutMs: 120_000,

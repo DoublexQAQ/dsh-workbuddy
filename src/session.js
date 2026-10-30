@@ -62,12 +62,26 @@ function writeJsonPrivate(file, value) {
   fs.renameSync(temp, file)
 }
 
-/** 打开浏览器的后台动作；失败不影响登录（URL 已经写进日志）。 */
+/**
+ * 打开浏览器的后台动作；失败不影响登录（URL 已经写进日志，设置页也给出链接）。
+ *
+ * ⚠️ Windows 上**不能走 `cmd start`**：授权链接形如
+ * `…/login?platform=VSCode&state=<uuid>`，cmd 把 `&` 当命令分隔符——实测（2026-10-30）
+ * 无论给 URL 加不加引号、`start ""` 用不用标题占位，`&state=…` 都会从参数里消失
+ * （node → cmd 的命令行转义救不回来）。浏览器拿到无 state 的链接，用户登的是另一个
+ * state，插件轮询的那个 state 永远回 `11217 login ing…`，最后 `login timed out`——
+ * 这就是「点了登录但登不上」的真因。
+ *
+ * 走 `powershell -EncodedCommand Start-Process`：脚本以 UTF-16LE base64 进内存，
+ * URL 是 PS 单引号字符串字面量，不经过 cmd 解析——实测含 `&` 的 URL 逐字符保真。
+ */
 function openBrowser(url) {
   try {
     if (process.platform === 'win32') {
-      // `start` 是 cmd 内建命令，第一个空参数是窗口标题占位。
-      spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore', windowsHide: true }).unref()
+      const script = `Start-Process -LiteralPath '${String(url).replace(/'/g, "''")}'`
+      const encoded = Buffer.from(script, 'utf16le').toString('base64')
+      const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { detached: true, stdio: 'ignore', windowsHide: true })
+      child.unref()
       return true
     }
     const command = process.platform === 'darwin' ? 'open' : 'xdg-open'

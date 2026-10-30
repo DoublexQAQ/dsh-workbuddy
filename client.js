@@ -48,6 +48,7 @@ window.__ModuleLoader__.load({
         importDone: '已导入 {imported} 个账号（新增 {created} 个）',
         importPartial: '已导入 {imported} 个（新增 {created}），跳过：{skipped}',
         importFailed: '导入失败：{reason}',
+        importGo: '导入这些账号',
         export: '导出 JSON',
         exportHint: '导出账号与凭据（含 token，仅本机回环接口），可直接粘回「导入 JSON」或备份',
         exportDone: '已导出 workbuddy-accounts.json（并已复制到剪贴板）',
@@ -130,6 +131,7 @@ window.__ModuleLoader__.load({
         importDone: 'Imported {imported} account(s) ({created} new)',
         importPartial: 'Imported {imported} ({created} new); skipped: {skipped}',
         importFailed: 'Import failed: {reason}',
+        importGo: 'Import these accounts',
         export: 'Export JSON',
         exportHint: 'Export accounts and credentials (includes tokens; loopback-only route). Paste it back into Import, or keep it as a backup.',
         exportDone: 'Exported workbuddy-accounts.json (also copied to the clipboard)',
@@ -225,6 +227,7 @@ window.__ModuleLoader__.load({
 .wbk-link { color: var(--dsw-alias-brand-primary); word-break: break-all; font-size: 12.5px; }
 .wbk-field { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; }
 .wbk-input { font: inherit; font-size: 13px; padding: 5px 8px; border-radius: 7px; border: 1px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
+.wbk-textarea { width: 100%; box-sizing: border-box; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.5; padding: 8px 10px; border-radius: 7px; border: 1px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); resize: vertical; }
 .wbk-check { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 `
 
@@ -368,9 +371,11 @@ window.__ModuleLoader__.load({
       const cnAvailable = routeNames.codebuddy !== undefined
       const intlAvailable = routeNames.workbuddy !== undefined
 
-      const doImport = async () => {
-        const text = window.prompt(t('importPrompt'))
-        if (typeof text !== 'string' || text.trim() === '') return
+      const [importDraft, setImportDraft] = useState(undefined)
+
+      const submitImport = async () => {
+        const text = String(importDraft ?? '').trim()
+        if (text === '') return
         let parsed
         try {
           parsed = JSON.parse(text)
@@ -378,6 +383,7 @@ window.__ModuleLoader__.load({
           setMessage({ tone: 'err', text: t('importBadJson', { reason: cause instanceof Error ? cause.message : String(cause) }) })
           return
         }
+        setImportDraft(undefined)
         setMessage({ tone: 'ok', text: t('working') })
         try {
           const payload = await call('/import', { body: parsed })
@@ -416,7 +422,8 @@ window.__ModuleLoader__.load({
           anchor.href = url
           anchor.download = name
           anchor.click()
-          URL.revokeObjectURL(url)
+          // revoke 必须晚于下载真正开始：同步 revoke 会让部分内核把这次下载掐掉。
+          setTimeout(() => URL.revokeObjectURL(url), 30_000)
           await navigator.clipboard?.writeText(text).catch(() => {})
           setMessage({ tone: 'ok', text: t('exportDone') })
         } catch (cause) {
@@ -445,7 +452,8 @@ window.__ModuleLoader__.load({
             h('button', {
               className: 'wbk-btn',
               disabled: busy !== undefined,
-              onClick: () => void doImport(),
+              title: t('importPrompt'),
+              onClick: () => setImportDraft(importDraft === undefined ? '' : undefined),
             }, t('import')),
             h('button', {
               className: 'wbk-btn',
@@ -485,6 +493,29 @@ window.__ModuleLoader__.load({
                     }, t('copyLink'))
                   : null,
                 h('button', { className: 'wbk-btn', onClick: () => { void call('/login/cancel', { body: { state: login.state } }); setLogin(undefined) } }, t('cancel'))))
+          : null,
+
+        // 导入面板：Electron 渲染端没有 window.prompt（点了会 unhandledrejection），
+        // 所以粘贴框直接开在页面里。
+        importDraft !== undefined
+          ? h('div', { className: 'wbk-card' },
+              h('p', { className: 'wbk-title' }, t('import')),
+              h('p', { className: 'wbk-sub' }, t('importPrompt')),
+              h('textarea', {
+                className: 'wbk-textarea',
+                rows: 8,
+                spellcheck: false,
+                placeholder: '{"accounts":[{"route":"codebuddy","auth":{"accessToken":"…"},"account":{"uid":"…","nickname":"…"}}]}',
+                value: importDraft,
+                onChange: event => setImportDraft(event.target.value),
+              }),
+              h('div', { className: 'wbk-row' },
+                h('button', {
+                  className: 'wbk-btn wbk-btn-primary',
+                  disabled: busy !== undefined || String(importDraft).trim() === '',
+                  onClick: () => void submitImport(),
+                }, t('importGo')),
+                h('button', { className: 'wbk-btn', onClick: () => setImportDraft(undefined) }, t('cancel'))))
           : null,
 
         message !== undefined
