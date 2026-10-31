@@ -16,10 +16,18 @@
  * @module src/platform.js
  */
 
-/** 官方客户端的版本串。国内这条是 UA 门禁的一部分，不能随便改。 */
+/**
+ * 官方客户端的版本串。国内这条是 UA 门禁的一部分，不能随便改。
+ *
+ * 国际版 UA 是**实测值**（2026-10-31 逐组验证）：三段式全小写
+ * `workbuddy-ai/<ide> workbuddy-ai/<ide> CLI/<cli>`。旧值 `WorkBuddy/5.5.2 …`
+ * 来自二手文档，上游不认（chat 直接 `request illegal`、/v3/config check ua 也看它）。
+ */
 export const CN_PRODUCT_VERSION = '4.12.0'
 export const CN_USER_AGENT = `CodeBuddyIDE/${CN_PRODUCT_VERSION}`
-export const INTL_USER_AGENT = 'WorkBuddy/5.5.2 CodeBuddyCLI/2.137.1'
+export const INTL_IDE_VERSION = '5.7.6'
+export const INTL_CLI_VERSION = '2.156.0'
+export const INTL_USER_AGENT = `workbuddy-ai/${INTL_IDE_VERSION} workbuddy-ai/${INTL_IDE_VERSION} CLI/${INTL_CLI_VERSION}`
 
 /**
  * 海外版**绝不发送**的头。官方抓包的包头集合里没有这几个，多发一个就是特征差异。
@@ -39,6 +47,9 @@ export const INTL_FORBIDDEN_HEADERS = Object.freeze([
 /**
  * 出站头白名单之外的**宿主指纹**头。任何名字命中这些片段的头都不允许上线，
  * 它们正是「被代理到 DSH」的可观测证据。
+ *
+ * ⚠️ 不包含 `x-agent`：实测（2026-10-31）官方 intl chat 自己就发
+ * `x-agent-intent` / `x-agent-purpose` / `x-agent-type`——它是官方指纹的一部分。
  */
 export const HOST_FINGERPRINT_HEADERS = Object.freeze([
   'user-agent-attribution',
@@ -47,7 +58,6 @@ export const HOST_FINGERPRINT_HEADERS = Object.freeze([
   'deepseek-harness',
   'x-harness',
   'x-opencode',
-  'x-agent',
   'x-client-name',
   'x-session-affinity-source',
 ])
@@ -129,11 +139,19 @@ export const PLATFORMS = {
     defaultDeviceTokenFile: '',
     userAgent: INTL_USER_AGENT,
     product: 'SaaS',
-    productVersion: '5.5.2',
-    ideType: 'VSCode',
-    ideName: 'VSCode',
-    ideVersion: '1.100.0',
+    productVersion: INTL_IDE_VERSION,
+    ideType: 'WorkBuddy',
+    ideName: 'WorkBuddy',
+    ideVersion: INTL_IDE_VERSION,
     deviceToken: false,
+    // 实测（2026-10-31）intl chat 必发的会话 id 族：`x-conversation-id` +
+    // `x-conversation-message-id` + `x-conversation-request-id`（32hex）。
+    // 缺任何一个 → 400 request illegal。
+    officialChatIds: true,
+    // messages 首条必须是 system；缺了 → 400 first message is not system prompt。
+    requiresSystemFirst: true,
+    // 官方 intl chat 连流式请求的 accept 都是 application/json（实测两种都通，按官方）。
+    chatAccept: 'application/json',
     forbidHeaders: INTL_FORBIDDEN_HEADERS,
     chatPath: '/v2/chat/completions',
     configPath: '/v3/config?repos=',

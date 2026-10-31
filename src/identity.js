@@ -114,12 +114,29 @@ export function buildHeaders({ profile, auth, deviceToken, session, stream, gzip
     put('x-b3-sampled', '1')
   }
   put('x-conversation-id', session?.conversationId)
-  put('x-session-id', session?.conversationId)
+  // `x-session-id` 是国内车道行为；官方 intl chat 不带它（实测的官方最小集里也没有）。
+  if (!profile.officialChatIds) put('x-session-id', session?.conversationId)
+
+  // 国际版官方 chat 的会话 id 族与归属头（实测 2026-10-31：缺 id 族即 400 request illegal）。
+  if (profile.officialChatIds) {
+    put('x-conversation-message-id', session?.messageId)
+    put('x-conversation-request-id', session?.requestId)
+    // 官方 intl：x-request-id 与 x-conversation-message-id 同值；root 用 request id。
+    put('x-request-id', session?.messageId)
+    put('x-root-request-id', session?.requestId)
+    put('x-agent-intent', 'craft')
+    put('x-agent-purpose', 'conversation')
+    put('x-agent-type', 'main')
+    put('x-private-data', 'true')
+    put('x-codebuddy-request', '1')
+    put('x-requested-with', 'XMLHttpRequest')
+  }
 
   for (const [name, value] of Object.entries(extra)) put(name, value)
 
   put('content-type', 'application/json')
-  put('accept', stream ? 'text/event-stream' : 'application/json')
+  // 官方 intl chat 连流式请求的 accept 都是 application/json；国内仍是 SSE 协商。
+  put('accept', profile.chatAccept ?? (stream ? 'text/event-stream' : 'application/json'))
   // 官方客户端对大请求体会压缩；宿主 HTTP 栈的默认 accept-encoding 不是官方头，绝不透传。
   if (gzip) {
     put('content-encoding', 'gzip')
@@ -180,7 +197,11 @@ export class IdentityStore {
   }
 
   /**
-   * 取（必要时铸造）一段对话的链身份，并为本轮分配一个 span。
+   * 取（必要时铸造）一段对话的链身份，并为本轮分配一个 span 与消息 id。
+   *
+   * `messageId` / `requestId` 是给国际版官方 chat 的会话 id 族用的（实测缺它们
+   * 直接 400 request illegal）；国内车道不读这两个字段，多发无害也不发——
+   * 它们在 `buildHeaders` 里只随 `officialChatIds` 上线。
    *
    * @param {string|undefined} seed - DSH 会话 id；缺省时压到 `global`
    * @param {string} [format]
@@ -198,6 +219,8 @@ export class IdentityStore {
       conversationId: entry.conversationId,
       traceId: entry.traceId,
       spanId: mintSpanId(),
+      messageId: mintRequestId(),
+      requestId: mintRequestId(),
     }
   }
 

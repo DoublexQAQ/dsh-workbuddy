@@ -20,7 +20,7 @@
 
 import { buildHeaders, isBalanceExhausted } from './identity.js'
 import { displayDescription, displayName } from './catalog.js'
-import { DegradeWindow, isSecurityRejection, neutralizeChatBody } from './prompt.js'
+import { DegradeWindow, NEUTRAL_SYSTEM, isSecurityRejection, neutralizeChatBody } from './prompt.js'
 import { openStream, TransportError } from './http.js'
 import { needsVision, repairToolPairing, toChatMessages, toToolDefs } from './messages.js'
 import { sanitizeOutbound } from './sanitize.js'
@@ -318,6 +318,12 @@ export class WorkBuddyAdapter {
       const first = messages[0]
       if (first?.role === 'system') messages[0] = { role: 'system', content: `${sanitized.system}\n\n${first.content}` }
       else messages.unshift({ role: 'system', content: sanitized.system })
+    }
+    // 国际版实测硬规则：messages 首条必须是 system，否则 400
+    // `first message is not system prompt`。降级分支给的中性 system 已在首位，这里
+    // 只兜「宿主这轮压根没传 system」的情况，官方客户端在这条上补的也是这句。
+    if (profile.requiresSystemFirst === true && messages[0]?.role !== 'system') {
+      messages.unshift({ role: 'system', content: NEUTRAL_SYSTEM })
     }
 
     const chain = identity.chainFor(options.sessionId, this.deps.config.conversationIdFormat)
