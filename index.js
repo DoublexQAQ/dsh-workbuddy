@@ -65,6 +65,15 @@ const DEFAULTS = Object.freeze({
    * `0` = 关闭闸门。只闸模型车道——每日签到 / 余额刷新照常跑（那正是回血途径）。
    */
   creditFloor: 100,
+  /**
+   * 功能 1（按模型预算切号）的默认值；设置页可改，改后落盘持久（文件优先于这里）。
+   * - modelBudgetEnabled：false 时账号任意轮切，只受 creditFloor 底线约束。
+   * - modelBudget：单账号在单个模型上当日（北京日）的消耗预算（积分），用满即切。
+   * - switchFloor：轮换目标的最低余额——已知余额低于它的账号永远不会被切过去。
+   */
+  modelBudgetEnabled: true,
+  modelBudget: 200,
+  switchFloor: 0,
   contextWindow: undefined,
   maxTokens: undefined,
   stateDir: undefined,
@@ -146,6 +155,9 @@ export function apply(ctx, config) {
       autoActivity: settings.autoActivity !== false,
       activityHours: settings.activityHours,
       autoGrowth: settings.autoGrowth !== false,
+      modelBudgetEnabled: settings.modelBudgetEnabled !== false,
+      modelBudget: settings.modelBudget,
+      switchFloor: settings.switchFloor,
     },
   })
 

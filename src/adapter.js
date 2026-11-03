@@ -255,10 +255,18 @@ export class WorkBuddyAdapter {
     // （账号按路由隔离：国内账号不能给海外路由用，反之亦然。）
     const accounts = this.deps.accounts
     if (accounts !== undefined) {
-      const picked = accounts.pickForModel(provider)
+      // 功能 1：把本轮模型传进去——账号在**这个模型**上当日消耗到预算就不再当值，
+      // 自动切到没花超、且余额 ≥ switchFloor 的别的账号。
+      const picked = accounts.pickForModel(provider, model)
       if (picked.account === undefined) {
         const others = accounts.all().length
-        if (picked.allDrained === true) {
+        if (picked.budgetExhausted === true) {
+          // 每个号都在这个模型上花超了（余额都还够）：如实报预算，而不是报「没积分了」。
+          yield errorChunk(
+            `所有 ${profile.label} 账号今天在 ${model} 上都已用满预算（每号 ${accounts.modelBudget} 积分），本路由暂停该模型；等明天（北京日）自动重置，或调高预算 / 关闭「按模型预算切号」。`,
+            'CLIENT',
+          )
+        } else if (picked.allDrained === true) {
           // 全部账号余额都低于下限：停止使用，点名每个账号的余额，用户自己去充值/等签到回血。
           const detail = picked.drained
             .map(row => `${row.nickname ?? row.uid ?? row.id}：${row.credits}`)

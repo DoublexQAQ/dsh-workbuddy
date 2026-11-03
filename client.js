@@ -114,6 +114,21 @@ window.__ModuleLoader__.load({
         modelsFreeCount: '共 {total} 个模型，其中 {free} 个免费',
         free: '免费',
         thinking: '可思考',
+        sectionCn: '国内账号',
+        sectionIntl: '海外账号',
+        accountCount: '个账号',
+        emptyCn: '国内还没有账号——点上方「登录国内账号」。',
+        emptyIntl: '海外还没有账号——点上方「登录国际版账号」。',
+        budgetTitle: '按模型预算切号',
+        budgetHint: '开启后：某个账号在单个模型上当日（北京日）消耗达到预算就自动切到别的账号；被切过去的账号余额必须不低于「轮换下限」（未测过余额的账号也不会当目标）。关闭则任意轮切，但仍不会使用余额低于硬底线 creditFloor 的账号。',
+        budgetEnabled: '按模型预算自动切号',
+        budgetPerModel: '每模型当日预算（积分）',
+        budgetSwitchFloor: '轮换下限（低于此余额不被切过去，0=不限制）',
+        budgetSave: '保存预算设置',
+        budgetUsed: '模型预算已用满：{models}',
+        belowSwitchFloor: '余额低于轮换下限 {floor}，不会被切过去',
+        unknownBalance: '余额未测，设了下限后不会被切过去',
+        todaySpend: '今日已花',
       },
       en: {
         'meta.title': 'WorkBuddy accounts',
@@ -198,6 +213,21 @@ window.__ModuleLoader__.load({
         modelsFreeCount: '{total} models, {free} of them free',
         free: 'free',
         thinking: 'thinking',
+        sectionCn: 'Domestic accounts',
+        sectionIntl: 'Overseas accounts',
+        accountCount: 'accounts',
+        emptyCn: 'No domestic account yet — press “Add domestic account” above.',
+        emptyIntl: 'No overseas account yet — press “Add international account” above.',
+        budgetTitle: 'Per-model budget rotation',
+        budgetHint: 'While on: when an account spends its daily (Beijing day) budget on one model, calls rotate to another; a rotation target must also hold at least the switch floor (accounts with an unmeasured balance are never targets). Switched off: accounts rotate freely, but one under the hard creditFloor is still never used.',
+        budgetEnabled: 'Rotate by per-model budget',
+        budgetPerModel: 'Daily budget per model (credits)',
+        budgetSwitchFloor: 'Switch floor (never rotate to accounts below; 0 = unrestricted)',
+        budgetSave: 'Save budget settings',
+        budgetUsed: 'model budget used up: {models}',
+        belowSwitchFloor: 'below switch floor {floor}, never rotated to',
+        unknownBalance: 'balance unmeasured; never rotated to while a switch floor is set',
+        todaySpend: 'Today spent',
       },
     }
 
@@ -273,6 +303,8 @@ window.__ModuleLoader__.load({
       // 若某个 useState 落在 `return` 之后，首次渲染（state 未就绪提前返回）少跑一个 hook，
       // 数据到齐后再渲染又多一个 → Minified React error #310，整个设置页白屏。
       const [importDraft, setImportDraft] = useState(undefined)
+      // 功能 1 的草稿：undefined = 未编辑（显示生效值）；编辑中才用草稿值。
+      const [budgetDraft, setBudgetDraft] = useState(undefined)
       const pollRef = useRef(undefined)
 
       const load = useCallback(async () => {
@@ -377,6 +409,93 @@ window.__ModuleLoader__.load({
       const routeNames = state.routeNames ?? {}
       const cnAvailable = routeNames.codebuddy !== undefined
       const intlAvailable = routeNames.workbuddy !== undefined
+      // 功能 2：账号分栏——国内一栏、海外一栏，各栏独立显示「当前」与操作。
+      const cnAccounts = accounts.filter(account => account.route !== 'workbuddy')
+      const intlAccounts = accounts.filter(account => account.route === 'workbuddy')
+
+      const saveBudget = async () => {
+        const draft = budgetDraft ?? {}
+        await act('/settings', {
+          modelBudgetEnabled: draft.enabled ?? (settings.modelBudgetEnabled !== false),
+          modelBudget: Number(draft.model ?? settings.modelBudget ?? 200),
+          switchFloor: Number(draft.floor ?? settings.switchFloor ?? 0),
+        }, 'budget')
+        setBudgetDraft(undefined)
+      }
+
+      /**
+       * 一个账号的卡片行（功能 2：两栏共用同一渲染器，只有外层分组不同）。
+       * 预算开着时额外标出「该号今天哪些模型已花超」——那正是它被切走的原因。
+       */
+      const accountRow = account => {
+        const budget = state.budget ?? {}
+        const spend = Object.entries(account.todayModelSpend ?? {})
+        const overModels = budget.enabled === true && Number(budget.modelBudget) > 0
+          ? spend.filter(([, value]) => Number(value) >= Number(budget.modelBudget)).map(([key]) => key)
+          : []
+        return h('div', { className: 'wbk-account', key: account.id },
+          h('div', { className: 'wbk-between' },
+            h('div', { className: 'wbk-row' },
+              h('span', { className: 'wbk-name' }, account.nickname ?? account.uid ?? account.id),
+              account.active === true ? h('span', { className: 'wbk-tag wbk-tag-active' }, t('active')) : null,
+              account.hasRefreshToken !== true ? h('span', { className: 'wbk-tag wbk-tag-warn' }, 'no refresh token') : null,
+              overModels.length > 0 ? h('span', { className: 'wbk-tag wbk-tag-warn' }, t('budgetUsed', { models: overModels.join('、') })) : null),
+            h('div', { className: 'wbk-row' },
+              account.active === true
+                ? null
+                : h('button', { className: 'wbk-btn', disabled: busy !== undefined, onClick: () => void act('/activate', { id: account.id }, 'activate') }, t('setActive')),
+              h('button', { className: 'wbk-btn', disabled: busy !== undefined, onClick: () => void act('/checkin', { id: account.id }, 'checkin') }, t('checkinNow')),
+              h('button', { className: 'wbk-btn', disabled: busy !== undefined, onClick: () => void act('/credits', { id: account.id }, 'credits') }, t('credits')),
+              h('button', { className: 'wbk-btn', disabled: busy !== undefined, onClick: () => void act('/refresh', { id: account.id }, 'refresh') }, t('refreshToken')),
+              h('button', {
+                className: 'wbk-btn wbk-btn-danger',
+                disabled: busy !== undefined,
+                onClick: () => {
+                  if (window.confirm(t('removeConfirm', { name: account.nickname ?? account.uid ?? account.id })) === true) {
+                    void act('/remove', { id: account.id }, 'remove')
+                  }
+                },
+              }, t('remove')))),
+          h('div', { className: 'wbk-meta' },
+            h('span', { className: 'wbk-mono' }, `${t('uid')} ${account.uid ?? '—'}`),
+            h('span', null, `${t('credit')} ${account.credits === undefined ? '—' : account.credits}`),
+            // 余额低于闸门：模型车道已经不再用它（签到照常）。
+            account.creditLow === true ? h('span', { className: 'wbk-tag wbk-tag-warn' }, t('lowCredit', { floor: state.creditFloor ?? '?' })) : null,
+            // 余额低于「轮换下限」（或从未测过余额、而下限 > 0）：还能当值，但不会被切过去。
+            (budget.enabled === true && Number(budget.switchFloor) > 0
+              && (account.credits === undefined || Number(account.credits) < Number(budget.switchFloor)))
+              ? h('span', { className: 'wbk-tag wbk-tag-warn' }, account.credits === undefined ? t('unknownBalance') : t('belowSwitchFloor', { floor: budget.switchFloor }))
+              : null,
+            h('span', null, `${t('streak')} ${account.streakDays ?? '—'}`),
+            h('span', { className: account.daily?.checkin !== undefined ? 'wbk-msg-ok' : '' },
+              `${t('todayCheckin')}：${account.daily?.checkin !== undefined ? t('yes') : t('no')}`)),
+          // 功能 1：今日各模型已花（预算开着才显示）。
+          budget.enabled === true && spend.length > 0
+            ? h('div', { className: 'wbk-msg wbk-sub' },
+                `${t('todaySpend')}：${spend.map(([key, value]) => `${key} ${value}/${budget.modelBudget ?? '?'}`).join(' · ')}`)
+            : null,
+          // 上一次调用真实扣掉的积分（上游末帧 usage.credit，免费模型就是 0）。
+          account.lastUsage
+            ? h('div', { className: 'wbk-msg wbk-sub' },
+                `${t('usageLast', { model: account.lastUsage.model ?? '—', credit: account.lastUsage.credit ?? '?' })}`
+                + (account.lastUsage.inputTokens !== undefined
+                  ? ` · ${account.lastUsage.inputTokens}→${account.lastUsage.outputTokens ?? 0} tok`
+                  : ''))
+            : null,
+          // 积分按资源包到期作废：还剩多少 + 哪个包先到期，一起显示。
+          (account.creditPackages ?? []).length > 0
+            ? h('div', { className: 'wbk-msg wbk-sub' },
+                t('packages', {
+                  list: (account.creditPackages ?? [])
+                    .map(row => `${row.name ?? '资源包'} ${row.remain}${row.expiresAt ? `（到 ${String(row.expiresAt).slice(0, 10)}）` : ''}`)
+                    .join(' · '),
+                }))
+            : null,
+          account.lastCheckin
+            ? h('div', { className: account.lastCheckin.ok === true ? 'wbk-msg wbk-msg-ok' : 'wbk-msg wbk-msg-err' },
+                t('lastResult', { message: account.lastCheckin.message ?? '—' }))
+            : h('div', { className: 'wbk-msg wbk-sub' }, t('neverRan')))
+      }
 
       const submitImport = async () => {
         const text = String(importDraft ?? '').trim()
@@ -549,63 +668,69 @@ window.__ModuleLoader__.load({
           ? h('p', { className: `wbk-msg ${message.tone === 'ok' ? 'wbk-msg-ok' : message.tone === 'warn' ? 'wbk-msg-warn' : 'wbk-msg-err'}` }, message.text)
           : null,
 
-        h('div', { className: 'wbk-card' },
-          h('p', { className: 'wbk-title' }, t('accounts')),
-          // 有闸门时说明一次规则，用户看见「低于 X 自动切」不是猜的。
-          (state.creditFloor ?? 0) > 0 ? h('p', { className: 'wbk-sub' }, t('floorNote', { floor: state.creditFloor })) : null,
-          accounts.length === 0 ? h('p', { className: 'wbk-sub' }, t('empty')) : null,
-          accounts.map(account => h('div', { className: 'wbk-account', key: account.id },
+        // ── 功能 1 的预算控件：按模型消耗到预算就切号，切号还要求余额≥下限 ──
+        (() => {
+          const budget = state.budget ?? {}
+          const effectiveEnabled = (budgetDraft ?? {}).enabled ?? budget.enabled !== false
+          const draft = budgetDraft ?? {}
+          return h('div', { className: 'wbk-card' },
+            h('p', { className: 'wbk-title' }, t('budgetTitle')),
+            h('p', { className: 'wbk-sub' }, t('budgetHint')),
+            h('div', { className: 'wbk-field' },
+              h('label', { className: 'wbk-check' },
+                h('input', {
+                  type: 'checkbox',
+                  checked: effectiveEnabled,
+                  onChange: event => setBudgetDraft(current => ({ ...(current ?? {}), enabled: event.target.checked })),
+                }),
+                t('budgetEnabled'))),
+            h('div', { className: 'wbk-field' },
+              h('span', null, t('budgetPerModel')),
+              h('input', {
+                className: 'wbk-input',
+                type: 'number',
+                min: 1,
+                disabled: effectiveEnabled !== true,
+                value: draft.model ?? budget.modelBudget ?? 200,
+                onChange: event => setBudgetDraft(current => ({ ...(current ?? {}), model: event.target.value })),
+              })),
+            h('div', { className: 'wbk-field' },
+              h('span', null, t('budgetSwitchFloor')),
+              h('input', {
+                className: 'wbk-input',
+                type: 'number',
+                min: 0,
+                disabled: effectiveEnabled !== true,
+                value: draft.floor ?? budget.switchFloor ?? 0,
+                onChange: event => setBudgetDraft(current => ({ ...(current ?? {}), floor: event.target.value })),
+              })),
+            h('div', { className: 'wbk-row' },
+              h('button', {
+                className: 'wbk-btn',
+                disabled: busy !== undefined || budgetDraft === undefined,
+                onClick: () => void saveBudget(),
+              }, busy === 'budget' ? t('working') : t('budgetSave'))))
+        })(),
+
+        // ── 功能 2：国内一栏、海外一栏；每栏各自显示当前与操作 ──────────────
+        (() => {
+          const sections = [['codebuddy', t('sectionCn'), cnAccounts], ['workbuddy', t('sectionIntl'), intlAccounts]]
+          if (accounts.length === 0) {
+            return h('div', { className: 'wbk-card' },
+              h('p', { className: 'wbk-title' }, t('accounts')),
+              h('p', { className: 'wbk-sub' }, t('empty')))
+          }
+          return sections.map(([key, label, rows]) => h('div', { className: 'wbk-card', key },
             h('div', { className: 'wbk-between' },
-              h('div', { className: 'wbk-row' },
-                h('span', { className: 'wbk-name' }, account.nickname ?? account.uid ?? account.id),
-                account.active === true ? h('span', { className: 'wbk-tag wbk-tag-active' }, t('active')) : null,
-                account.hasRefreshToken !== true ? h('span', { className: 'wbk-tag wbk-tag-warn' }, 'no refresh token') : null),
-              h('div', { className: 'wbk-row' },
-                account.active === true
-                  ? null
-                  : h('button', { className: 'wbk-btn', disabled: busy !== undefined, onClick: () => void act('/activate', { id: account.id }, 'activate') }, t('setActive')),
-                h('button', { className: 'wbk-btn', disabled: busy !== undefined, onClick: () => void act('/checkin', { id: account.id }, 'checkin') }, t('checkinNow')),
-                h('button', { className: 'wbk-btn', disabled: busy !== undefined, onClick: () => void act('/credits', { id: account.id }, 'credits') }, t('credits')),
-                h('button', { className: 'wbk-btn', disabled: busy !== undefined, onClick: () => void act('/refresh', { id: account.id }, 'refresh') }, t('refreshToken')),
-                h('button', {
-                  className: 'wbk-btn wbk-btn-danger',
-                  disabled: busy !== undefined,
-                  onClick: () => {
-                    if (window.confirm(t('removeConfirm', { name: account.nickname ?? account.uid ?? account.id })) === true) {
-                      void act('/remove', { id: account.id }, 'remove')
-                    }
-                  },
-                }, t('remove')))),
-            h('div', { className: 'wbk-meta' },
-              h('span', { className: 'wbk-tag' }, account.route === 'workbuddy' ? t('routeIntl') : t('routeCn')),
-              h('span', { className: 'wbk-mono' }, `${t('uid')} ${account.uid ?? '—'}`),
-              h('span', null, `${t('credit')} ${account.credits === undefined ? '—' : account.credits}`),
-              // 余额低于闸门：模型车道已经不再用它（签到照常）。
-              account.creditLow === true ? h('span', { className: 'wbk-tag wbk-tag-warn' }, t('lowCredit', { floor: state.creditFloor ?? '?' })) : null,
-              h('span', null, `${t('streak')} ${account.streakDays ?? '—'}`),
-              h('span', { className: account.daily?.checkin !== undefined ? 'wbk-msg-ok' : '' },
-                `${t('todayCheckin')}：${account.daily?.checkin !== undefined ? t('yes') : t('no')}`)),
-            // 上一次调用真实扣掉的积分（上游末帧 usage.credit，免费模型就是 0）。
-            account.lastUsage
-              ? h('div', { className: 'wbk-msg wbk-sub' },
-                  `${t('usageLast', { model: account.lastUsage.model ?? '—', credit: account.lastUsage.credit ?? '?' })}`
-                  + (account.lastUsage.inputTokens !== undefined
-                    ? ` · ${account.lastUsage.inputTokens}→${account.lastUsage.outputTokens ?? 0} tok`
-                    : ''))
+              h('p', { className: 'wbk-title' }, label),
+              h('span', { className: 'wbk-tag' }, rows.length + ' ' + t('accountCount'))),
+            (state.creditFloor ?? 0) > 0 && key === 'codebuddy'
+              ? h('p', { className: 'wbk-sub' }, t('floorNote', { floor: state.creditFloor }))
               : null,
-            // 积分按资源包到期作废：还剩多少 + 哪个包先到期，一起显示。
-            (account.creditPackages ?? []).length > 0
-              ? h('div', { className: 'wbk-msg wbk-sub' },
-                  t('packages', {
-                    list: (account.creditPackages ?? [])
-                      .map(row => `${row.name ?? '资源包'} ${row.remain}${row.expiresAt ? `（到 ${String(row.expiresAt).slice(0, 10)}）` : ''}`)
-                      .join(' · '),
-                  }))
-              : null,
-            account.lastCheckin
-              ? h('div', { className: account.lastCheckin.ok === true ? 'wbk-msg wbk-msg-ok' : 'wbk-msg wbk-msg-err' },
-                  t('lastResult', { message: account.lastCheckin.message ?? '—' }))
-              : h('div', { className: 'wbk-msg wbk-sub' }, t('neverRan'))))),
+            rows.length === 0
+              ? h('p', { className: 'wbk-sub' }, key === 'workbuddy' ? t('emptyIntl') : t('emptyCn'))
+              : rows.map(accountRow)))
+        })(),
 
         h('div', { className: 'wbk-card' },
           h('div', { className: 'wbk-between' },
