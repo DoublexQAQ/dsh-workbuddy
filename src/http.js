@@ -25,6 +25,20 @@ import { toFailure } from './identity.js'
 /** 超过这个体积才压缩（官方客户端也只是对大请求体压缩）。 */
 export const DEFAULT_GZIP_THRESHOLD = 4096
 
+/** 瞬时 DNS 失败会在内部自动重试（最多重试这么多次，共 n+1 次尝试）。 */
+export const DEFAULT_DNS_RETRIES = 2
+const DNS_RETRY_DELAYS = Object.freeze([400, 900])
+
+/**
+ * 瞬时 DNS 解析失败：这类错误重发一次往往就好——`getaddrinfo ENOTFOUND` 多数是
+ * 路由器/系统 DNS 一时没答上来，不是域名真的不存在（域名是否存在由上游说了算，
+ * 这里只做「先试了再说」）。`ENOTFOUND` 之外还覆盖 DNS 服务器忙/瞬时失败的那几个码。
+ */
+export function isTransientDnsError(error) {
+  const code = error?.code
+  return code === 'ENOTFOUND' || code === 'EAI_AGAIN' || code === 'EAI_FAIL' || code === 'EAI_NODATA' || code === 'ESERVFAIL'
+}
+
 /** keep-alive 连接池：同 origin 复用，避免每轮 TLS 握手这种非官方节奏。 */
 const agents = new Map()
 
@@ -109,62 +123,75 @@ export function send(input) {
       reject(new TransportError('aborted before dispatch', 'ABORTED'))
       return
     }
-    const request = (target.protocol === 'http:' ? http : https).request(
-      {
-        protocol: target.protocol,
-        hostname: target.hostname,
-        port: target.port === '' ? undefined : Number(target.port),
-        path: `${target.pathname}${target.search}`,
-        method,
-        headers: outgoing,
-        agent: agentFor(target.protocol, keepAlive),
-      },
-      response => {
-        const status = response.statusCode ?? 0
-        /** @type {Record<string, string>} */
-        const responseHeaders = {}
-        for (const [name, value] of Object.entries(response.headers)) {
-          if (value === undefined) continue
-          responseHeaders[name] = Array.isArray(value) ? value.join(', ') : String(value)
-        }
-        if (!readBody) {
-          resolve({ status, headers: responseHeaders, stream: response, gzipUsed })
+
+    /**
+     * 派发一次请求。DNS 瞬时失败（getaddrinfo ENOTFOUND 那族）在请求体还没
+     * 写出去之前会重试：这类错误多数是路由器/系统 DNS 一时没答上来，重发就好。
+     * 域名真不存在时重试两次也不亏——最终仍把 ENOTFOUND 原样交给上层报错。
+     */
+    const dispatch = attemptsLeft => {
+      const request = (target.protocol === 'http:' ? http : https).request(
+        {
+          protocol: target.protocol,
+          hostname: target.hostname,
+          port: target.port === '' ? undefined : Number(target.port),
+          path: `${target.pathname}${target.search}`,
+          method,
+          headers: outgoing,
+          agent: agentFor(target.protocol, keepAlive),
+        },
+        response => {
+          const status = response.statusCode ?? 0
+          /** @type {Record<string, string>} */
+          const responseHeaders = {}
+          for (const [name, value] of Object.entries(response.headers)) {
+            if (value === undefined) continue
+            responseHeaders[name] = Array.isArray(value) ? value.join(', ') : String(value)
+          }
+          if (!readBody) {
+            resolve({ status, headers: responseHeaders, stream: response, gzipUsed })
+            return
+          }
+          const chunks = []
+          response.on('data', chunk => chunks.push(chunk))
+          response.on('end', () => {
+            const buffer = Buffer.concat(chunks)
+            const text = decodeBody(buffer, responseHeaders)
+            resolve({ status, headers: responseHeaders, text, json: parseJson(text), gzipUsed })
+          })
+          response.on('error', error => reject(new TransportError(`response stream failed: ${error.message}`, 'TRANSPORT', { cause: error })))
+        },
+      )
+
+      const onAbort = () => {
+        request.destroy(new TransportError('aborted by the caller', 'ABORTED'))
+      }
+      signal?.addEventListener('abort', onAbort, { once: true })
+      const clearAbort = () => signal?.removeEventListener('abort', onAbort)
+
+      request.on('error', error => {
+        clearAbort()
+        if (error?.name === 'TransportError' && error.code === 'ABORTED') {
+          reject(error)
           return
         }
-        const chunks = []
-        response.on('data', chunk => chunks.push(chunk))
-        response.on('end', () => {
-          const buffer = Buffer.concat(chunks)
-          const text = decodeBody(buffer, responseHeaders)
-          resolve({ status, headers: responseHeaders, text, json: parseJson(text), gzipUsed })
-        })
-        response.on('error', error => reject(new TransportError(`response stream failed: ${error.message}`, 'TRANSPORT', { cause: error })))
-      },
-    )
+        // 瞬时 DNS 失败：这类错误发生在建连之前，请求体根本没发出去过，
+        // 还有重试次数就稍等重发——重发的是同一条完整请求，不会出现半包。
+        if (attemptsLeft > 0 && isTransientDnsError(error)) {
+          setTimeout(() => dispatch(attemptsLeft - 1), DNS_RETRY_DELAYS[DEFAULT_DNS_RETRIES - attemptsLeft] ?? 500)
+          return
+        }
+        const code = error?.code === 'ETIMEDOUT' || error?.code === 'UND_ERR_CONNECT_TIMEOUT' ? 'TIMEOUT' : 'TRANSPORT'
+        reject(new TransportError(`transport: ${error?.message ?? String(error)}`, code, { cause: error }))
+      })
+      request.setTimeout(timeoutMs, () => {
+        request.destroy(new TransportError(`no response within ${timeoutMs}ms`, 'TIMEOUT'))
+      })
+      if (payload !== undefined) request.write(payload)
+      request.end()
+    }
 
-    const onAbort = () => {
-      request.destroy(new TransportError('aborted by the caller', 'ABORTED'))
-    }
-    signal?.addEventListener('abort', onAbort, { once: true })
-    const settle = fn => value => {
-      signal?.removeEventListener('abort', onAbort)
-      fn(value)
-    }
-    request.on('error', error => {
-      signal?.removeEventListener('abort', onAbort)
-      if (error?.name === 'TransportError' && error.code === 'ABORTED') {
-        reject(error)
-        return
-      }
-      const code = error?.code === 'ETIMEDOUT' || error?.code === 'UND_ERR_CONNECT_TIMEOUT' ? 'TIMEOUT' : 'TRANSPORT'
-      reject(new TransportError(`transport: ${error?.message ?? String(error)}`, code, { cause: error }))
-    })
-    request.setTimeout(timeoutMs, () => {
-      request.destroy(new TransportError(`no response within ${timeoutMs}ms`, 'TIMEOUT'))
-    })
-    if (payload !== undefined) request.write(payload)
-    request.end()
-    void settle
+    dispatch(DEFAULT_DNS_RETRIES)
   })
 }
 
