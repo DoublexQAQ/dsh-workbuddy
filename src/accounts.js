@@ -36,14 +36,30 @@ export const DEFAULT_DAILY_SETTINGS = Object.freeze({
   activityHours: Object.freeze([10]),
   autoGrowth: true,
   /**
-   * 功能 1（按模型预算切号）：开启后，单账号在**单个模型**上当日消耗达到
-   * `modelBudget` 就轮换到别的账号；轮换目标还必须余额 ≥ `switchFloor`
-   * 且在该模型上没花超。关闭则任意轮切（只受 creditFloor 底线约束）。
-   * 这三项 UI 可改、落盘持久。
+   * 模型轮换链：用户自己挑 3–4 个模型，数组顺序 = 优先级。
+   * 第一个被上游禁用（模型下线 / 账号无权限 / 限流）就自动轮到后面的；
+   * 整条链在该账号上全被禁用，就自动轮换到下一个账号（再按链从第一个试）。
+   * 链为空 = 关闭这套轮换，直接用请求里的模型。
    */
-  modelBudgetEnabled: true,
-  modelBudget: 200,
+  modelChain: Object.freeze([]),
+  modelChainEnabled: true,
+  /**
+   * 旧版「按模型预算切号」参数：保留仅为了读老配置文件不炸，
+   * 已不参与切号决策（轮换改由 modelChain 负责）。
+   */
+  modelBudgetEnabled: false,
+  modelBudget: 0,
   switchFloor: 0,
+  /**
+   * 自动兑换：刷新成长/发现「可兑」档位时当场全部兑掉，不等于下一次签到闭环。
+   * 设置页可关；关掉后只报告「可兑 X 档」，兑换仍走签到闭环或手动。
+   */
+  autoRedeem: true,
+  /**
+   * 积分闸门阈值：用户自己填的数，已知余额低于它的账号自动跳过并换号；
+   * 全部低于就停止使用（签到回血后自动恢复）。`0` = 关闭闸门。
+   */
+  creditFloor: 100,
 })
 
 /** 北京自然日（预算的重置边界，与签到回血同一天花板）。本地算，避免与 schedule.js 成环。 */
@@ -58,37 +74,118 @@ export class AccountsStore {
    * @param {string} input.file
    * @param {{debug?: Function, warn?: Function, info?: Function}} [input.logger]
    * @param {object} [input.settings] - 每日任务的初始设置（来自插件 config）
-   * @param {number} [input.creditFloor] - 模型车道的积分下限：已知余额低于它的账号**不参与
-   *   聊天调用**（自动切到够的账号；全都不够就停用报错）。`0` = 关闭。
+   * @param {number} [input.creditFloor] - 积分闸门的**初始**值；生效值在 settings.creditFloor
+   *   （UI 可改、落盘持久）。已知余额低于它的账号自动换掉；全都低于就停用报错。`0` = 关闭。
    *   只闸模型车道：每日签到 / 余额刷新照常跑——那正是低积分账号回血的途径。
-   * 预算/切换下限三参数走 `settings`（见 DEFAULT_DAILY_SETTINGS），UI 可改，不再挤构造函数。
    */
-  constructor({ file, logger, settings = {}, creditFloor = 0 }) {
+  constructor({ file, logger, settings = {}, creditFloor }) {
     this.file = file
     this.logger = logger ?? {}
     this.settings = { ...DEFAULT_DAILY_SETTINGS, ...settings }
-    const floor = Number(creditFloor)
-    this.creditFloor = Number.isFinite(floor) && floor > 0 ? floor : 0
+    // 种子优先级：settings.creditFloor（index.js 显式传入 / 文件里存的）> 构造参数 > 默认值。
+        // 必须在合并 DEFAULTS 之前读原始 settings——否则默认的 100 永远压过构造参数，
+        // new AccountsStore({ creditFloor: 0 }) 想关闸门会被默认值吃掉（实测踩过的坑）。
+        const seed = Number(settings.creditFloor ?? creditFloor ?? DEFAULT_DAILY_SETTINGS.creditFloor)
+    // 合法数字（含 0=关闸）直接采用，负数按 0 处理；NaN 才落默认值。
+    this.settings.creditFloor = Number.isFinite(seed) ? Math.max(0, Math.round(seed)) : DEFAULT_DAILY_SETTINGS.creditFloor
     /** @type {Array<object>} */
     this.accounts = []
     this.load()
   }
 
-  // ── 功能 1：按模型的消耗预算与轮换下限（全部读 settings，UI 可改、落盘）──────
-  get modelBudgetEnabled() {
-    return this.settings.modelBudgetEnabled !== false
+  /**
+   * 积分闸门阈值：用户自己填的数，已知余额低于它的账号不参与聊天调用。
+   * 读 settings（UI 可改、落盘持久），`0` = 关闭闸门。
+   */
+  get creditFloor() {
+    const floor = Number(this.settings.creditFloor)
+    return Number.isFinite(floor) && floor > 0 ? floor : 0
   }
 
-  get modelBudget() {
-    const budget = Number(this.settings.modelBudget)
-    return Number.isFinite(budget) && budget > 0 ? budget : 0
+  set creditFloor(value) {
+    const floor = Number(value)
+    if (Number.isFinite(floor) && floor >= 0) this.settings.creditFloor = Math.round(floor)
+  }
+
+  // ── 模型轮换链（用户自选 3–4 个模型，按顺序 fallback）──────────────────────
+  /** 用户选定的模型链，数组顺序 = 优先级。空数组 = 不启用链式轮换。 */
+  get modelChain() {
+    const list = Array.isArray(this.settings.modelChain) ? this.settings.modelChain : []
+    return [...new Set(list.filter(id => typeof id === 'string' && id !== ''))].slice(0, 6)
+  }
+
+  get modelChainEnabled() {
+    return this.settings.modelChainEnabled !== false && this.modelChain.length > 0
   }
 
   /**
-   * 轮换下限：余额**已知**低于此值的账号永远不会被当轮换目标；`0` = 不限制
-   * （未测过余额的账号此时可以当目标）。当前账号的连任不受此限——它限制的是「切过去」。
-   * creditFloor 是另一条独立底线（已知余额低于它的账号根本不参与），两者叠加生效。
+   * 这个账号今天在该模型上是否已被判「禁用」。
+   * 记录来源：上游明确拒绝（模型下线 / 无权限 / 限流冷却），写进 account.modelBlocked。
    */
+  modelBlocked(account, model) {
+    if (model === undefined || model === '') return false
+    const map = account?.modelBlocked
+    if (map === null || typeof map !== 'object' || map.date !== cstDay()) return false
+    return map[model] !== undefined
+  }
+
+  /** 把一个模型在这个账号上标记禁用（当日有效，跨天自动失效）。 */
+  blockModel(id, model, reason) {
+    const account = this.byId(id)
+    if (account === undefined || typeof model !== 'string' || model === '') return
+    const today = cstDay()
+    const map = account.modelBlocked !== null && typeof account.modelBlocked === 'object' && account.modelBlocked.date === today
+      ? account.modelBlocked
+      : { date: today }
+    map[model] = { at: Date.now(), reason: String(reason ?? '') }
+    account.modelBlocked = map
+    this.save()
+  }
+
+  /** 清空某个账号当日的模型禁用表（用户手动解除）。 */
+  clearModelBlocks(id) {
+    const account = this.byId(id)
+    if (account === undefined) return
+    account.modelBlocked = undefined
+    this.save()
+  }
+
+  /**
+   * 给这个账号挑出**实际可用**的模型链：按用户顺序，跳过今日已被禁用的。
+   * 链为空 / 功能关闭时，退化成 `[请求的模型]`（跳过禁用判定）。
+   *
+   * @param {object|undefined} account
+   * @param {string} requested - 本轮请求的模型
+   * @returns {{ model: string, chain: string[], skipped: string[], exhausted: boolean }}
+   */
+  chainForAccount(account, requested) {
+    const chain = this.modelChainEnabled ? this.modelChain : []
+    if (chain.length === 0) return { model: requested, chain: [requested], skipped: [], exhausted: false }
+    const skipped = []
+    for (const model of chain) {
+      if (this.modelBlocked(account, model)) { skipped.push(model); continue }
+      return { model, chain, skipped, exhausted: false }
+    }
+    // 整条链在这个号上都被禁用了
+    return { model: undefined, chain, skipped, exhausted: true }
+  }
+
+  /** 候选账号：启用、未撞 creditFloor，且（开了链时）链上还有没被禁的模型。 */
+  accountsWithChainLeft(route, requested) {
+    return this.enabled(route)
+      .filter(account => !this.belowFloor(account))
+      .filter(account => this.chainForAccount(account, requested).exhausted !== true)
+  }
+
+  // ── 旧版预算接口：保评论/兼容，不参与决策 ─────────────────────────────────
+  get modelBudgetEnabled() {
+    return false
+  }
+
+  get modelBudget() {
+    return 0
+  }
+
   get switchFloor() {
     const wanted = Number(this.settings.switchFloor)
     return Number.isFinite(wanted) && wanted > 0 ? wanted : 0
@@ -102,15 +199,15 @@ export class AccountsStore {
     return Number.isFinite(credits) && credits >= floor
   }
 
-  /** 该账号今日（北京日）在该模型上的累计消耗。 */
+  /** 该账号今日（北京日）在该模型上的累计消耗（仅用于展示，不参与切号）。 */
   modelSpend(account, model) {
     if (account?.modelUsage?.date !== cstDay()) return 0
     return Number(account.modelUsage?.[model]) || 0
   }
 
-  /** 该账号今日在该模型上是否已花到预算（预算关 / 未设 = 永远不超）。 */
-  overModelBudget(account, model) {
-    return this.modelBudgetEnabled && this.modelBudget > 0 && this.modelSpend(account, model) >= this.modelBudget
+  /** 旧版预算判定：已停用，恒为 false。 */
+  overModelBudget() {
+    return false
   }
 
   /**
@@ -298,76 +395,125 @@ export class AccountsStore {
   }
 
   /**
-   * 模型车道可用（可作当前 / 轮换目标）的账号：启用、不撞 creditFloor；
-   * 预算开启时还要求**该模型上没花超**。
+   * 模型车道可用（可作当前 / 轮换目标）的账号：启用、不撞 creditFloor、
+   * 且（开了链时）链上还有没被禁的模型。
    */
-  usableForModel(route, model) {
-    return this.enabled(route).filter(account => !this.belowFloor(account)
-      && !(model !== undefined && this.overModelBudget(account, model)))
+  usableForModel(route, requested) {
+    return this.enabled(route)
+      .filter(account => !this.belowFloor(account))
+      .filter(account => this.chainForAccount(account, requested).exhausted !== true)
   }
 
   /**
-   * 轮换目标池（功能 1 的语义核心）：
-   * - 关闭预算：任意轮切，只有 creditFloor 底线（用户原话「账号任意切换，但不能低于100」）。
-   * - 开启预算：还要在该模型上没花超，且**余额已知且 ≥ switchFloor**——
-   *   未测过余额的账号不当目标（无法证明它够），余额低于下限的账号永不切过去。
+   * 轮换目标池：启用、不撞 creditFloor、（开了链时）链上还有没被禁的模型。
    */
-  rotationCandidates(route, model) {
+  rotationCandidates(route, requested) {
     const base = this.enabled(route).filter(account => !this.belowFloor(account))
-    if (!this.modelBudgetEnabled) return base
-    const underBudget = model === undefined ? base : base.filter(account => !this.overModelBudget(account, model))
-    return underBudget.filter(account => this.meetsSwitchFloor(account))
+    if (this.modelChain.length === 0) return base
+    return base.filter(account => this.chainForAccount(account, requested).exhausted !== true)
   }
 
   /**
-   * 模型车道取当前账号。
+   * 取本轮「账号 + 模型」组合。
    *
-   * 语义分两层（用户明确要求的）：
-   * - **当前账号的连任**只看 creditFloor + 该模型当日预算——它只要还能干活就继续用，
-   *   哪怕余额低于 switchFloor（「不能作为切换的」限制的是切*过去*，不是留在原地）；
-   * - **必须换人时**按 `rotationCandidates` 挑，候选按「今日在该模型花得最少」排序
-   *   （把消耗摊匀，而不是逮着一个薅），并列时优先当前、再按加入顺序。
+   * 规则：
+   * 1. 用户选定的模型链按顺序试，第一个还能用的就是本轮的模型；
+   * 2. 当前账号在这条链上全被禁用了 → 换账号，换到链上还有可用模型的号；
+   * 3. 换过去的号从链的第一个模型重新开始试。
    *
    * @param {string} [route]
-   * @param {string} [model] - 功能 1 用：账号在该模型上的当日预算判定
-   * @returns {{account?: object, allDrained: boolean, drained: object[], budgetExhausted?: boolean}}
+   * @param {string} [requested] - 本轮请求的模型（链为空时直接用它）
+   * @returns {{
+   *   account?: object, model?: string, chain: string[], skipped: string[],
+   *   allDrained: boolean, drained: object[], chainExhausted?: boolean
+   * }}
    */
-  pickForModel(route, model) {
+  pickForModel(route, requested) {
     const pool = this.enabled(route)
-    if (pool.length === 0) return { allDrained: false, drained: [] }
-    const current = pool.find(account => account.active === true) ?? pool[0]
-    const currentOk = current !== undefined
-      && !this.belowFloor(current)
-      && !(this.modelBudgetEnabled && model !== undefined && this.overModelBudget(current, model))
-    if (currentOk) return { account: current, allDrained: false, drained: [] }
+    if (pool.length === 0) return { chain: [], skipped: [], allDrained: false, drained: [] }
 
-    const candidates = this.rotationCandidates(route, model)
+    const current = pool.find(account => account.active === true) ?? pool[0]
+
+    if (current !== undefined && !this.belowFloor(current)) {
+      const pick = this.chainForAccount(current, requested)
+      if (pick.exhausted !== true) {
+        return { account: current, model: pick.model, chain: pick.chain, skipped: pick.skipped, allDrained: false, drained: [] }
+      }
+    }
+
+    const candidates = this.rotationCandidates(route, requested)
     const drained = pool.filter(account => !candidates.includes(account))
     if (candidates.length === 0) {
+      const everyoneLow = pool.every(account => this.belowFloor(account))
       return {
-        allDrained: pool.every(account => this.belowFloor(account)),
-        budgetExhausted: pool.length > 0
-          && model !== undefined
-          && this.modelBudgetEnabled
-          && pool.every(account => !this.belowFloor(account) && (this.overModelBudget(account, model) || !this.meetsSwitchFloor(account)))
-          && pool.some(account => this.overModelBudget(account, model)),
+        chain: this.modelChain.length > 0 ? this.modelChain : (requested === undefined ? [] : [requested]),
+        skipped: current === undefined ? [] : this.chainForAccount(current, requested).skipped,
+        allDrained: everyoneLow,
+        chainExhausted: everyoneLow !== true && this.modelChain.length > 0,
         drained,
       }
     }
-    const spendOf = account => model === undefined || !this.modelBudgetEnabled ? 0 : this.modelSpend(account, model)
-    const next = [...candidates].sort((a, b) => (spendOf(a) - spendOf(b))
-      || ((b.active === true ? 1 : 0) - (a.active === true ? 1 : 0)))[0]
+
+    const next = candidates[0]
+    const pick = this.chainForAccount(next, requested)
     if (next.active !== true) {
-      const reason = current !== undefined && model !== undefined && this.overModelBudget(current, model)
-        ? `模型 ${model} 今日预算（${this.modelBudget}）已用完`
-        : current !== undefined && this.belowFloor(current)
-          ? `余额低于 ${this.creditFloor}`
-          : '不满足轮换条件'
       for (const account of this.accounts) if (account.route === next.route) account.active = account.id === next.id
       this.save()
-      this.logger.info?.(`workbuddy: 当前账号${reason}，模型车道已切到 ${next.nickname ?? next.uid ?? next.id}`)
+      const reason = current === undefined
+        ? '没有当前账号'
+        : this.belowFloor(current)
+          ? `余额低于 ${this.creditFloor}`
+          : `模型链 [${this.modelChain.join(' → ')}] 在该账号上全部被禁用`
+      this.logger.info?.(`workbuddy: ${reason}，已切到 ${next.nickname ?? next.uid ?? next.id}，本轮用 ${pick.model}`)
     }
-    return { account: next, allDrained: false, drained }
+    return { account: next, model: pick.model, chain: pick.chain, skipped: pick.skipped, allDrained: false, drained }
+  }
+
+  /**
+   * 上游拒绝时换到下一个账号（换号后从链的第一个模型重来）。
+   *
+   * 只认 creditFloor：这条是「当前号被拒了，得马上换一个」，
+   * 卡别的条件会让一轮调用直接失败，而失败本身并不说明余额不够。
+   *
+   * @param {string} route
+   * @param {Iterable<string>} [exclude] - 本轮已经试过的账号 id
+   * @param {string} [requested] - 换号后按这条链重新挑模型
+   * @returns {object|undefined} 新的当前账号
+   */
+  failover(route, exclude, requested) {
+    const skip = new Set(exclude ?? [])
+    const pool = this.enabled(route)
+    if (pool.length === 0) return undefined
+    const current = pool.find(account => account.active === true)
+    const candidates = pool
+      .filter(account => !skip.has(account.id) && !this.belowFloor(account))
+      .filter(account => this.chainForAccount(account, requested).exhausted !== true)
+    if (candidates.length === 0) return undefined
+    const next = candidates[0]
+    if (next.id === current?.id) return next
+    for (const account of this.accounts) if (account.route === next.route) account.active = account.id === next.id
+    this.save()
+    this.logger.warn?.(`workbuddy: 上游拒绝了 ${current?.nickname ?? current?.uid ?? current?.id ?? '当前账号'}，已换到 ${next.nickname ?? next.uid ?? next.id}`)
+    return next
+  }
+
+
+  /**
+   * 记一次上游拒绝：只写诊断字段，不动余额（余额归零是 `recordUsage`/积分闸门的事）。
+   *
+   * @param {string} id
+   * @param {{message?: string, code?: string, status?: number}} failure
+   */
+  noteFailure(id, failure) {
+    const account = this.byId(id)
+    if (account === undefined) return
+    account.lastError = {
+      at: Date.now(),
+      message: String(failure?.message ?? 'upstream rejected'),
+      code: failure?.code,
+      status: failure?.status,
+    }
+    this.save()
   }
 
   /**
@@ -406,7 +552,7 @@ export class AccountsStore {
     this.save()
   }
 
-  /** 更新每日任务设置（来自 UI 的开关与时刻）。 */
+  /** 更新设置（来自 UI 的开关、时刻、模型链）。 */
   updateSettings(patch) {
     const next = { ...this.settings }
     if (typeof patch.autoCheckin === 'boolean') next.autoCheckin = patch.autoCheckin
@@ -414,7 +560,21 @@ export class AccountsStore {
     if (typeof patch.autoGrowth === 'boolean') next.autoGrowth = patch.autoGrowth
     if (Array.isArray(patch.checkinHours)) next.checkinHours = normalizeHours(patch.checkinHours, DEFAULT_DAILY_SETTINGS.checkinHours)
     if (Array.isArray(patch.activityHours)) next.activityHours = normalizeHours(patch.activityHours, DEFAULT_DAILY_SETTINGS.activityHours)
-    // 功能 1：按模型预算切号（UI 可改，落盘持久）。
+    // 模型轮换链：用户自选 3–4 个，数组顺序即优先级；去重、去空、上限 6。
+    if (Array.isArray(patch.modelChain)) {
+      const list = patch.modelChain
+        .map(value => (typeof value === 'string' ? value.trim() : ''))
+        .filter(value => value !== '')
+      next.modelChain = [...new Set(list)].slice(0, 6)
+    }
+    if (typeof patch.modelChainEnabled === 'boolean') next.modelChainEnabled = patch.modelChainEnabled
+    if (typeof patch.autoRedeem === 'boolean') next.autoRedeem = patch.autoRedeem
+    // 积分闸门：用户自己填的数（0 = 关闭）。负数按 0 处理，别静默丢掉整条更新。
+    if (patch.creditFloor !== undefined) {
+      const floor = Number(patch.creditFloor)
+      if (Number.isFinite(floor)) next.creditFloor = Math.max(0, Math.round(floor))
+    }
+    // 旧参数照收（老页面还能改），但不参与决策。
     if (typeof patch.modelBudgetEnabled === 'boolean') next.modelBudgetEnabled = patch.modelBudgetEnabled
     if (patch.modelBudget !== undefined) {
       const budget = Number(patch.modelBudget)
@@ -476,23 +636,40 @@ export class AccountsStore {
       hasRefreshToken: typeof account.auth?.refreshToken === 'string' && account.auth.refreshToken !== '',
       credits: account.credits,
       creditsAt: account.creditsAt,
-      creditPackages: Array.isArray(account.creditPackages) ? account.creditPackages.slice(0, 5) : undefined,
+      // 资源包明细（CodeBuddy个人版拉新权益包 / 国内运营裂变包 …）不再下发到页面。
       streakDays: account.streakDays,
+      streakAt: account.streakAt,
+      streakTiers: Array.isArray(account.streakTiers) ? account.streakTiers : undefined,
+      // 「兑换 / 抽奖 / 活跃」三件事的最近一次结果，账号行里逐条显示。
+      lastRedeem: account.lastRedeem,
+      lastLottery: account.lastLottery,
       daily: account.daily ?? {},
       lastCheckin: account.lastCheckin,
       lastActivity: account.lastActivity,
-      lastUsage: account.lastUsage,
       creditLog: Array.isArray(account.creditLog) ? account.creditLog.slice(-10) : [],
-      // 功能 1：今日（北京日）各模型已花积分。预算开着时 UI 才能显示「glm-5.3：80/200」。
+      // 今日各模型已花积分（纯展示，不参与切号）。
       todayModelSpend: account.modelUsage?.date === cstDay()
         ? Object.fromEntries(Object.entries(account.modelUsage).filter(([key, value]) => key !== 'date' && Number.isFinite(Number(value))))
+        : undefined,
+      // 今日已被上游禁用（或用户手动禁用）的模型：{ 模型id: { at, reason } }，跨天自动失效。
+      modelBlocked: account.modelBlocked?.date === cstDay()
+        ? Object.fromEntries(Object.entries(account.modelBlocked).filter(([key]) => key !== 'date'))
         : undefined,
     })
     // 刻意不返回 null 字段：浏览器侧只要按「有/没有」判断就绝不会踩到 null.ok 这类崩溃。
     return {
       settings: this.settings,
-      creditFloor: this.creditFloor > 0 ? this.creditFloor : undefined,
-      // 功能 1 的生效值（两条底线独立：creditFloor 管参与，switchFloor 管「被切过去」）。
+      // 积分闸门：用户自己填的数（0 / 未设 = 关闭）。页面可改，落盘持久。
+      creditFloor: this.creditFloor,
+      gate: {
+        floor: this.creditFloor,
+        enabled: this.creditFloor > 0,
+      },
+      // 模型轮换链的生效值：chain 是用户选定的顺序，enabled 表示这套轮换开没开。
+      chain: {
+        models: this.modelChain,
+        enabled: this.modelChainEnabled,
+      },
       budget: {
         enabled: this.modelBudgetEnabled,
         modelBudget: this.modelBudget,
@@ -576,6 +753,9 @@ function normalizeAccount(row) {
     creditPackages: Array.isArray(row.creditPackages) ? row.creditPackages.slice(0, 5) : undefined,
     streakDays: Number.isFinite(Number(row.streakDays)) ? Number(row.streakDays) : undefined,
     streakAt: Number(row.streakAt) || undefined,
+    streakTiers: Array.isArray(row.streakTiers) ? row.streakTiers.slice(0, 8) : undefined,
+    lastRedeem: row.lastRedeem ?? undefined,
+    lastLottery: row.lastLottery ?? undefined,
     daily: row.daily !== null && typeof row.daily === 'object' ? { ...row.daily } : {},
     lastCheckin: row.lastCheckin ?? undefined,
     lastActivity: row.lastActivity ?? undefined,
@@ -586,5 +766,8 @@ function normalizeAccount(row) {
       ? { ...row.modelUsage }
       : undefined,
     lastError: row.lastError ?? undefined,
+    modelBlocked: row.modelBlocked !== null && typeof row.modelBlocked === 'object' && !Array.isArray(row.modelBlocked)
+      ? { ...row.modelBlocked }
+      : undefined,
   }
 }

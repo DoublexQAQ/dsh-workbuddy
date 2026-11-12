@@ -500,10 +500,15 @@ export class SessionStore {
     if (injected?.auth?.accessToken !== undefined && this.config.trustStaticToken !== false) return this.credentials()
     if (await this.refresh()) return this.credentials()
     // 池子故障转移：当前账号刷不动时换下一个启用账号再试一次（设置页里能看到顶上的是谁）。
+    // 走 `failover()` 而不是 `rotate()`：这里的前提是「这个号坏了」，不是「该摊匀消耗」，
+    // 所以不看模型预算与 switchFloor，只认 creditFloor 这一条硬底线。
     if (this.accounts !== undefined && this.config.failover !== false) {
       const active = this.accounts.active(this.profile.route)
-      const next = this.accounts.rotate(active)
-      if (next !== undefined) {
+      const tried = [active?.id].filter(Boolean)
+      for (let round = 0; round < 3; round += 1) {
+        const next = this.accounts.failover(this.profile.route, tried)
+        if (next === undefined) break
+        tried.push(next.id)
         this.logger.warn?.(`workbuddy: 当前账号不可用，已切到 ${next.nickname ?? next.uid ?? next.id}`)
         if (this.credentials().accessToken !== undefined && this.isFresh()) return this.credentials()
         if (await this.refresh()) return this.credentials()

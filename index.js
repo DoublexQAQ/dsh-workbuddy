@@ -26,9 +26,10 @@ import { ModelCatalog, displayDescription, displayName } from './src/catalog.js'
 import { IdentityStore } from './src/identity.js'
 import { normalizeImportInput, prepareImportRows } from './src/import.js'
 import { SessionStore, unwrapAuth } from './src/session.js'
-import { reportActivity, runDailyGrowth, userResource } from './src/growth.js'
+import { growthStreak, lotterySummary, redeemTier, reportActivity, runDailyGrowth, userResource } from './src/growth.js'
 import { DailyScheduler, cstParts } from './src/schedule.js'
 import { PLATFORMS, ROUTES as ALL_ROUTES, UPSTREAM_CODES } from './src/platform.js'
+import { warmUp } from './src/dnsfix.js'
 
 export const name = 'dsh-workbuddy'
 
@@ -66,13 +67,17 @@ const DEFAULTS = Object.freeze({
    */
   creditFloor: 100,
   /**
-   * 功能 1（按模型预算切号）的默认值；设置页可改，改后落盘持久（文件优先于这里）。
-   * - modelBudgetEnabled：false 时账号任意轮切，只受 creditFloor 底线约束。
-   * - modelBudget：单账号在单个模型上当日（北京日）的消耗预算（积分），用满即切。
-   * - switchFloor：轮换目标的最低余额——已知余额低于它的账号永远不会被切过去。
+   * 模型轮换链：用户自选 3–4 个模型，数组顺序即优先级。
+   * 第一个被上游禁用（模型下线 / 账号无权限 / 限流）就轮到后面的；
+   * 整条链在该账号上都被禁用，就自动换到下一个账号，新账号从链的第一个模型重来。
+   * 空数组 = 关闭这套轮换，直接用请求里的模型。
    */
-  modelBudgetEnabled: true,
-  modelBudget: 200,
+  modelChain: [],
+  /**
+   * 旧版「按模型预算切号」参数：保留仅为了老配置不炸，不参与切号。
+   */
+  modelBudgetEnabled: false,
+  modelBudget: 0,
   switchFloor: 0,
   contextWindow: undefined,
   maxTokens: undefined,
@@ -144,6 +149,16 @@ export function apply(ctx, config) {
     }
   }
 
+  // 启动就把上游域名解析好并缓存，省掉首轮请求撞上系统 DNS 空窗。
+  const warmHosts = [...new Set(Object.values(PLATFORMS).map(item => {
+    try {
+      return new URL(item.endpoint).hostname
+    } catch {
+      return ''
+    }
+  }).filter(host => host !== ''))]
+  void warmUp(warmHosts).catch(() => {})
+
   // ── 账号池 ──────────────────────────────────────────────────────────────────
   const accounts = new AccountsStore({
     file: path.join(resolvedStateDir, 'accounts.json'),
@@ -155,9 +170,13 @@ export function apply(ctx, config) {
       autoActivity: settings.autoActivity !== false,
       activityHours: settings.activityHours,
       autoGrowth: settings.autoGrowth !== false,
+      modelChain: Array.isArray(settings.modelChain) ? settings.modelChain : [],
+      modelChainEnabled: settings.modelChainEnabled !== false,
       modelBudgetEnabled: settings.modelBudgetEnabled !== false,
       modelBudget: settings.modelBudget,
       switchFloor: settings.switchFloor,
+      // 积分闸门阈值：config 只当种子，文件里的值优先（用户在页面上改过就以文件为准）。
+      creditFloor: Number(settings.creditFloor ?? 0),
     },
   })
 
@@ -323,7 +342,10 @@ export function apply(ctx, config) {
    * 账号池里国内、国际混着放，国际账号的 token 拿去国内计费域只会 401）。
    * 活跃上报只对国内有意义，国际账号自动跳过并说明。
    *
-   * @param {{account?: object, kind: 'checkin'|'credits'|'refresh'|'activity'}} input
+   * `kind='growth'` 是纯读的一次刷新：拉连登天数 / 档位 / 抽奖次数写进账号池，
+   * 不签到、不兑换、不消耗任何东西。设置页的「刷新成长」按钮与启动补齐走这条。
+   *
+   * @param {{account?: object, kind: 'checkin'|'credits'|'refresh'|'activity'|'growth'}} input
    */
   async function runTask({ account, kind }) {
     const targets = account !== undefined ? [account] : accounts.enabled()
@@ -364,8 +386,82 @@ export function apply(ctx, config) {
           results.push({ id: target.id, name: label, kind, ok: activity.ok === true, message: activity.message })
           continue
         }
+        if (kind === 'growth') {
+          // 只读刷新：连登天数 + 档位状态 + 抽奖次数。不发签到、不兑换、不抽奖。
+          const streak = await growthStreak({ session: credentials, deviceToken, config: growthConfig })
+          const lottery = await lotterySummary({ session: credentials, deviceToken, config: growthConfig })
+          const at = Date.now()
+          const tiers = (streak.tiers ?? []).map(tier => ({
+            tier: tier.tier,
+            status: tier.status ?? (tier.locked === true ? 'locked' : tier.claimed === true ? 'claimed' : tier.unlocked === true ? 'available' : 'unknown'),
+            credit: Number(tier.credit) || 0,
+            energy: Number(tier.energy) || 0,
+            chances: Number(tier.chances) || 0,
+          }))
+          const chances = lottery.ok === true ? (lottery.times ?? 0) : undefined
+          // 只读刷新也要让「兑换」这一格有话说：从档位状态反推，claimed=已兑、available=可兑。
+          const claimedTiers = tiers.filter(tier => tier.status === 'claimed').map(tier => tier.tier)
+          const openTiers = tiers.filter(tier => tier.status === 'available').map(tier => tier.tier)
+          const redeemMessage = claimedTiers.length > 0
+            ? `已兑 ${claimedTiers.join('/')}${openTiers.length > 0 ? ` · 可兑 ${openTiers.join('/')}` : ''}`
+            : openTiers.length > 0
+              ? `可兑 ${openTiers.join('/')}`
+              : '无可兑换档位'
+          // 自动兑换：autoRedeem 开着、只读刷新发现有「可兑」档位时，当场全部兑掉——
+          // 不等下一次签到闭环（档位可领而未领就是白放着）。设置页可关。
+          const autoRedeemOn = accounts.settings.autoRedeem !== false
+          const autoRedeemResults = []
+          if (autoRedeemOn && openTiers.length > 0) {
+            for (const tier of openTiers) {
+              const redeem = await redeemTier({ session: credentials, tier, deviceToken, config: growthConfig })
+              autoRedeemResults.push({ tier, ok: redeem.ok === true, message: redeem.message })
+              logger.info?.(`workbuddy: 自动兑换 ${tier}（${label}）：${redeem.message}`)
+            }
+          }
+          const finalRedeemMessage = autoRedeemResults.length > 0
+            ? autoRedeemResults.map(row => `${row.tier}${row.ok === true ? '：' + row.message : '：失败 ' + (row.message ?? '')}`).join(' · ')
+            : redeemMessage
+          accounts.update(target.id, {
+            ...(streak.ok !== true ? {} : {
+              streakDays: streak.days,
+              streakAt: at,
+              streakTiers: tiers,
+              lastRedeem: {
+                at,
+                ok: autoRedeemResults.length > 0 ? autoRedeemResults.every(row => row.ok === true) : claimedTiers.length > 0,
+                count: autoRedeemResults.length > 0 ? autoRedeemResults.filter(row => row.ok === true).length : claimedTiers.length,
+                message: finalRedeemMessage,
+              },
+            }),
+            ...(chances === undefined ? {} : {
+              lastLottery: {
+                at,
+                chances,
+                drawn: target.lastLottery?.drawn ?? 0,
+                prizes: target.lastLottery?.prizes ?? [],
+                message: chances > 0 ? `有 ${chances} 次待抽` : '无抽奖次数',
+              },
+            }),
+          })
+          results.push({
+            id: target.id,
+            name: label,
+            kind,
+            ok: streak.ok === true,
+            message: streak.ok === true
+              ? `连登 ${streak.days ?? '?'} 天${autoRedeemResults.length > 0 ? `，自动兑换 ${autoRedeemResults.filter(row => row.ok === true).length}/${autoRedeemResults.length}` : ''}`
+              : (streak.message ?? '读取失败'),
+            streakDays: streak.days,
+            tiers,
+            chances,
+            redeem: autoRedeemResults,
+          })
+          continue
+        }
 
         const daily = await runDailyGrowth({ session: credentials, deviceToken, config: growthConfig, platform })
+        const redeems = Array.isArray(daily.redeem) ? daily.redeem : []
+        const draws = Array.isArray(daily.lottery?.draws) ? daily.lottery.draws : []
         accounts.update(target.id, {
           ...(daily.checkin === undefined
             ? {}
@@ -374,6 +470,34 @@ export function apply(ctx, config) {
           ...(daily.credits === undefined ? {} : { credits: daily.credits, creditsAt: daily.at }),
           ...(daily.packages === undefined ? {} : { creditPackages: daily.packages }),
           ...(daily.streakDays === undefined ? {} : { streakDays: daily.streakDays, streakAt: daily.at }),
+          ...(daily.tiers === undefined ? {} : { streakTiers: daily.tiers, streakTiersAt: daily.at }),
+          ...(daily.redeem === undefined
+            ? {}
+            : {
+                lastRedeem: {
+                  at: daily.at,
+                  ok: redeems.some(row => row.ok === true),
+                  count: redeems.filter(row => row.ok === true).length,
+                  message: redeems.length === 0
+                    ? '无可兑换档位'
+                    : redeems.map(row => `${row.tier}${row.ok === true ? '：' + row.message : '：失败 ' + (row.message ?? '')}`).join(' · '),
+                },
+              }),
+          ...(daily.lottery === undefined
+            ? {}
+            : {
+                lastLottery: {
+                  at: daily.at,
+                  chances: daily.lottery.times,
+                  drawn: draws.filter(row => row.ok === true).length,
+                  prizes: draws.filter(row => row.ok === true && row.prize).map(row => row.prize),
+                  message: daily.lottery.times === 0
+                    ? '无抽奖次数'
+                    : draws.length === 0
+                      ? '有次数未抽'
+                      : draws.map(row => row.ok === true ? row.prize ?? '已抽' : `失败 ${row.message ?? ''}`).join(' · '),
+                },
+              }),
           daily: { ...(target.daily ?? {}), checkin: cstParts(daily.at ?? Date.now()).date },
         })
         results.push({
@@ -409,6 +533,30 @@ export function apply(ctx, config) {
     },
   })
   scheduler.start(ctx)
+
+  /**
+   * 启动补齐：账号池里已有账号、但连登/档位/抽奖这几项还没数据时，静默拉一次只读快照。
+   * 老版本的账号池只存了 streakDays 甚至什么都没有，页面会一直显示「—」。
+   */
+  ctx.effect(() => {
+    let disposed = false
+    void (async () => {
+      await new Promise(resolve => setTimeout(resolve, Number(settings.startupGrowthDelayMs ?? 8_000)))
+      if (disposed) return
+      const stale = accounts.enabled().filter(account => account.route !== 'workbuddy'
+        && (account.streakTiers === undefined || account.lastLottery === undefined))
+      if (stale.length === 0) return
+      try {
+        await runTask({ kind: 'growth' })
+        logger.info?.(`workbuddy: 启动补齐成长快照 ${stale.length} 个账号`)
+      } catch (error) {
+        logger.warn?.(`workbuddy: 启动补齐失败（${error instanceof Error ? error.message : String(error)}）`)
+      }
+    })()
+    return () => {
+      disposed = true
+    }
+  }, 'dsh-workbuddy: startup growth snapshot')
 
   // ── 设置页的同源接口 ────────────────────────────────────────────────────────
   /** 每个**已启用**的平台路由一个登录协调器；页面用平台名（codebuddy / workbuddy）点名。 */

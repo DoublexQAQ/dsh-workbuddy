@@ -248,22 +248,26 @@ export class WorkBuddyAdapter {
     }
     const session = this.deps.sessionFor(provider)
     const identity = this.deps.identityFor(provider)
-    const model = baseModelId(options.model)
-    const entry = (profile.models ?? []).find(candidate => candidate.id === model)
+    const requestedModel = baseModelId(options.model)
+    let model = requestedModel
+    let entry = (profile.models ?? []).find(candidate => candidate.id === model)
 
     // 没有账号是**最常见的「用不了」**：给一句能照着做的错误，而不是让上游回 401。
     // （账号按路由隔离：国内账号不能给海外路由用，反之亦然。）
     const accounts = this.deps.accounts
+    /** 本轮模型轮换链（用于报错时点名），默认就是请求的那一个。 */
+    let modelChain = [requestedModel]
     if (accounts !== undefined) {
-      // 功能 1：把本轮模型传进去——账号在**这个模型**上当日消耗到预算就不再当值，
-      // 自动切到没花超、且余额 ≥ switchFloor 的别的账号。
-      const picked = accounts.pickForModel(provider, model)
+      // 模型轮换链：用户选定 3–4 个模型按顺序 fallback；整条链在该账号上都被禁用
+      // 就自动换账号，新账号从链的第一个模型重新试。pickForModel 一次给出账号 + 模型。
+      const picked = accounts.pickForModel(provider, requestedModel)
+      modelChain = Array.isArray(picked.chain) && picked.chain.length > 0 ? picked.chain : [requestedModel]
       if (picked.account === undefined) {
         const others = accounts.all().length
-        if (picked.budgetExhausted === true) {
-          // 每个号都在这个模型上花超了（余额都还够）：如实报预算，而不是报「没积分了」。
+        if (picked.chainExhausted === true) {
           yield errorChunk(
-            `所有 ${profile.label} 账号今天在 ${model} 上都已用满预算（每号 ${accounts.modelBudget} 积分），本路由暂停该模型；等明天（北京日）自动重置，或调高预算 / 关闭「按模型预算切号」。`,
+            `模型链 [${modelChain.join(' → ')}] 在所有 ${profile.label} 账号上都被禁用（模型下线 / 无权限 / 限流）。`
+            + '明天（北京日）自动解除，或在「设置 → WorkBuddy 账号」里换一组模型 / 手动清空禁用记录。',
             'CLIENT',
           )
         } else if (picked.allDrained === true) {
@@ -284,6 +288,11 @@ export class WorkBuddyAdapter {
           )
         }
         return
+      }
+      if (typeof picked.model === 'string' && picked.model !== '' && picked.model !== model) {
+        model = picked.model
+        entry = (profile.models ?? []).find(candidate => candidate.id === model)
+        this.logger.info?.(`workbuddy: 模型链生效，本轮用 ${model}`)
       }
     }
 
@@ -454,6 +463,58 @@ export class WorkBuddyAdapter {
         if (drainedAccount !== undefined && Number.isFinite(Number(drainedAccount.credits))) {
           this.deps.accounts.update(drainedAccount.id, { credits: 0, creditsAt: Date.now(), lastError: { at: Date.now(), message: failure.message } })
           this.logger.warn?.(`workbuddy: 上游报 ${drainedAccount.nickname ?? drainedAccount.id} 额度不足，已按 0 记账并交给积分闸门切换`)
+        }
+      }
+      // ── 失败分两类，别混着处理 ─────────────────────────────────────────────
+      //   · 模型级：MODEL(11102 下线) / PERMISSION(11158 该号不能用这个模型)
+      //     → 换号**解决不了**，同一个模型在别的号上一样被拒。只有 RATE_LIMIT
+      //       （6004 / 14003 / 429）可能是号级冷却，才值得换号。
+      //   · 账号级：CREDENTIAL / 余额见底 / 429
+      //     → 换号才有意义。
+      const modelOnly = failure.code === 'MODEL' || failure.code === 'PERMISSION'
+      const chain = this.deps.accounts?.modelChain ?? []
+
+      // ① 有链：只把**这个模型**在这个号上标禁用，同一个号换链里的下一个重试。
+      //    整条链在这个号上都被禁了，才交给 ② 去换号。
+      if (this.deps.accounts !== undefined && modelOnly && chain.length > 0
+        && Number(options.chainRetries ?? 0) < 8) {
+        const current = this.deps.accounts.active(provider)
+        if (current !== undefined) {
+          this.deps.accounts.blockModel(current.id, model, `${failure.code}: ${failure.message}`)
+          const next = this.deps.accounts.chainForAccount(current, requestedModel)
+          this.logger.warn?.(`workbuddy: ${model} 在 ${current.nickname ?? current.id} 上被禁用（${failure.code}）`
+            + (next.exhausted === true ? '，该账号的模型链已空，准备换号' : `，同账号改用 ${next.model}`))
+          if (next.exhausted !== true) {
+            yield* this.runStream({ ...options, retryAfterAuth: false, chainRetries: Number(options.chainRetries ?? 0) + 1 })
+            return
+          }
+        }
+      }
+
+      // ② 没有链 + 模型级失败：这个模型本身不可用，换号只会把整池账号挨个撞一遍。
+      //    直接如实报错，账号一个都不动（不写 lastError，不切当前账号）。
+      if (this.deps.accounts !== undefined && modelOnly && chain.length === 0) {
+        this.logger.warn?.(`workbuddy: ${model} 被上游拒绝（${failure.code}），换账号同样无效，本次不轮换`)
+        yield { type: 'finish', reason: { kind: 'error', failure } }
+        return
+      }
+
+      // ③ 换号重发：只对「这个账号被拒」这类失败做，且每个账号最多试一次。
+      //    RATE_LIMIT 留在这里 —— 它可能是号级冷却，换个号就能继续。
+      if (this.deps.accounts !== undefined && this.deps.config.failover !== false) {
+        const tried = Array.isArray(options.triedAccounts) ? options.triedAccounts : []
+        const rejected = this.deps.accounts.active(provider)
+        if (rejected !== undefined && !tried.includes(rejected.id)) {
+          this.deps.accounts.noteFailure(rejected.id, failure)
+          const switchable = failure.code === 'CREDENTIAL' || isBalanceExhausted(failure) || failure.code === 'RATE_LIMIT'
+          if (switchable) {
+            const next = this.deps.accounts.failover(provider, [...tried, rejected.id], requestedModel)
+            if (next !== undefined && next.id !== rejected.id) {
+              this.logger.info?.(`workbuddy: ${rejected.nickname ?? rejected.id} 被上游拒绝（${failure.code}），本轮换到 ${next.nickname ?? next.id} 重发`)
+              yield* this.runStream({ ...options, triedAccounts: [...tried, rejected.id], retryAfterAuth: false })
+              return
+            }
+          }
         }
       }
       yield { type: 'finish', reason: { kind: 'error', failure } }

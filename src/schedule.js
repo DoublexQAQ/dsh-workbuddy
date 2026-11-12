@@ -149,6 +149,8 @@ export async function runNow({ accounts, account, sessionFor, runGrowth, deviceT
   const credentials = await sessionFor(account)
   const result = await runGrowth({ session: credentials, deviceToken, config })
   const { date } = cstParts()
+  const redeems = Array.isArray(result.redeem) ? result.redeem : []
+  const draws = Array.isArray(result.lottery?.draws) ? result.lottery.draws : []
   accounts.update(account.id, {
     daily: { ...(account.daily ?? {}), checkin: date },
     ...(result.checkin === undefined
@@ -165,6 +167,34 @@ export async function runNow({ accounts, account, sessionFor, runGrowth, deviceT
     ...(result.activity === undefined ? {} : { lastActivity: { at: result.at, ok: result.activity.ok === true, message: result.activity.message } }),
     ...(result.credits === undefined ? {} : { credits: result.credits, creditsAt: result.at }),
     ...(result.streakDays === undefined ? {} : { streakDays: result.streakDays, streakAt: result.at }),
+    ...(result.tiers === undefined ? {} : { streakTiers: result.tiers, streakTiersAt: result.at }),
+    ...(result.redeem === undefined
+      ? {}
+      : {
+          lastRedeem: {
+            at: result.at,
+            ok: redeems.some(row => row.ok === true),
+            count: redeems.filter(row => row.ok === true).length,
+            message: redeems.length === 0
+              ? '无可兑换档位'
+              : redeems.map(row => `${row.tier}${row.ok === true ? '：' + row.message : '：失败 ' + (row.message ?? '')}`).join(' · '),
+          },
+        }),
+    ...(result.lottery === undefined
+      ? {}
+      : {
+          lastLottery: {
+            at: result.at,
+            chances: result.lottery.times,
+            drawn: draws.filter(row => row.ok === true).length,
+            prizes: draws.filter(row => row.ok === true && row.prize).map(row => row.prize),
+            message: result.lottery.times === 0
+              ? '无抽奖次数'
+              : draws.length === 0
+                ? '有次数未抽'
+                : draws.map(row => row.ok === true ? row.prize ?? '已抽' : `失败 ${row.message ?? ''}`).join(' · '),
+          },
+        }),
   })
   logger?.debug?.(`workbuddy: 手动积分任务完成（${account.nickname ?? account.uid ?? account.id}）`)
   return result

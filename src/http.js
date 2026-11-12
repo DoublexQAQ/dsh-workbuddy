@@ -21,6 +21,7 @@ import zlib from 'node:zlib'
 import { URL } from 'node:url'
 
 import { toFailure } from './identity.js'
+import { pinnedLookup } from './dnsfix.js'
 
 /** 超过这个体积才压缩（官方客户端也只是对大请求体压缩）。 */
 export const DEFAULT_GZIP_THRESHOLD = 4096
@@ -139,6 +140,9 @@ export function send(input) {
           method,
           headers: outgoing,
           agent: agentFor(target.protocol, keepAlive),
+          // 绕开系统 getaddrinfo：家用路由器 DNS 偶发 NXDOMAIN 会直接变成
+          // `getaddrinfo ENOTFOUND`，域名本身没坏。见 src/dnsfix.js。
+          lookup: pinnedLookup,
         },
         response => {
           const status = response.statusCode ?? 0
