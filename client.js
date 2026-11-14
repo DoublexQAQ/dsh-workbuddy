@@ -1727,6 +1727,13 @@ window.__ModuleLoader__.load({
       const low = typeof credits === 'number' && typeof floor === 'number' && floor > 0 && credits < floor
       const shown = typeof credits === 'number' ? Math.round(credits) : '—'
 
+      const locked = pinned !== undefined
+      const floatClass = [
+        'wbk-float',
+        dragging === true ? 'wbk-float-dragging' : '',
+        locked ? 'wbk-float-locked' : '',
+      ].filter(Boolean).join(' ')
+
       const hint = [
         tp('hbTitle', { name: active?.nickname ?? '—', credits: shown, count: accounts.length, total: Math.round(total ?? 0) }),
         // 跨路由各有当前账号时逐个点名，别让人猜「这数字是谁的」。
@@ -1751,12 +1758,6 @@ window.__ModuleLoader__.load({
           h('span', { className: 'wbk-hb-err', title: tp('hbError', { reason: error }) }, tp('hbError', { reason: error })))
       }
 
-      const locked = pinned !== undefined
-      const floatClass = [
-        'wbk-float',
-        dragging === true ? 'wbk-float-dragging' : '',
-        locked ? 'wbk-float-locked' : '',
-      ].filter(Boolean).join(' ')
       return h('div', {
         className: floatClass,
         style: { left: pos.x + 'px', top: pos.y + 'px' },
