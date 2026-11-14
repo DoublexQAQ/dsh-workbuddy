@@ -333,7 +333,11 @@ window.__ModuleLoader__.load({
 .wbk-textarea { width: 100%; box-sizing: border-box; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.5; padding: 8px 10px; border-radius: 7px; border: 1px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); resize: vertical; }
 .wbk-check { display: flex; align-items: center; gap: 6px; font-size: 11.5px; }
 /* 浮层胶囊：shell.overlay 里 position:fixed，坐标由 HB_POS 定死 */
-.wbk-float { position: fixed; max-width: none; overflow: visible; z-index: 60; display: inline-flex; align-items: center; gap: 4px; user-select: none; }
+.wbk-float { position: fixed; max-width: none; overflow: visible; z-index: 60;
+  cursor: grab; touch-action: none; display: inline-flex; align-items: center; gap: 4px; user-select: none; }
+/* 拖动中：手型 + 全局禁选中，免得拖拽时把聊天内容刷蓝。 */
+.wbk-float-dragging { cursor: grabbing; }
+.wbk-float-dragging * { cursor: grabbing !important; user-select: none !important; }
 .wbk-hb { font: inherit; display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 9px; border-radius: 999px; border: 1px solid var(--dsw-alias-border-l3); background: var(--dsw-alias-button-elevated-fill, var(--dsw-alias-bg-layer-1)); color: var(--dsw-alias-label-secondary); cursor: pointer; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .wbk-hb:hover { color: var(--dsw-alias-label-primary); border-color: var(--dsw-alias-brand-primary); background: var(--dsw-alias-button-tool-bar-fill, var(--dsw-alias-bg-layer-1)); }
 .wbk-hb:disabled { cursor: default; opacity: .7; }
@@ -1202,9 +1206,39 @@ window.__ModuleLoader__.load({
      * 点胶囊 = 刷新余额（打一次上游 `/credits`）；点 ⚙ = 展开账号列表快速切号。
      * 数据每 5 秒拉一次 `/state`（纯本地 JSON，不打上游；页面在后台时暂停）。
      */
-    /** 基线坐标：输入框没变高时胶囊就待在这儿（用户拖好定下的位置）。 */
+    /** 基线坐标：用户没拖过时胶囊待在这儿。 */
     const HB_POS = { x: 538, y: 660 }
     const HB_CAPSULE_H = 26
+    /** 用户手动摆好的位置存这里；有值就完全接管，不再跟输入框走。 */
+    const HB_POS_KEY = "dsh-workbuddy:capsule-pos"
+
+    function loadSavedPos() {
+      try {
+        const raw = window.localStorage?.getItem(HB_POS_KEY)
+        if (typeof raw !== "string" || raw === "") return undefined
+        const parsed = JSON.parse(raw)
+        if (Number.isFinite(parsed?.x) && Number.isFinite(parsed?.y)) return { x: Math.round(parsed.x), y: Math.round(parsed.y) }
+      } catch {
+        /* 隐私模式 / 存储被禁：当作没存过 */
+      }
+      return undefined
+    }
+
+    function savePos(pos) {
+      try {
+        window.localStorage?.setItem(HB_POS_KEY, JSON.stringify({ x: Math.round(pos.x), y: Math.round(pos.y) }))
+      } catch {
+        /* 存储不可用：本次会话仍可拖，只是不持久 */
+      }
+    }
+
+    function clearSavedPos() {
+      try {
+        window.localStorage?.removeItem(HB_POS_KEY)
+      } catch {
+        /* ignore */
+      }
+    }
 
     /**
      * 输入框那一整块（宿主的 `conversation.composer` 座位）。
@@ -1242,7 +1276,13 @@ window.__ModuleLoader__.load({
      * - 缩回单行：增量归 0 → 胶囊自动落回 HB_POS
      * - 找不到输入框（宿主改结构）：直接用 HB_POS
      */
-    function anchorPos() {
+    /**
+     * 胶囊位置：
+     * - 用户拖过（存了位置）→ **完全固定**，不再跟输入框，窗口变化只做防出界
+     * - 没拖过 → 基线 HB_POS + 输入框撑高的增量（老行为）
+     */
+    function anchorPos(pinned) {
+      if (pinned !== undefined) return clampPos(pinned)
       const rect = composerRect()
       if (rect === undefined) return clampPos(HB_POS)
       const height = Math.round(rect.height)
@@ -1422,11 +1462,92 @@ window.__ModuleLoader__.load({
       const [view, setView] = useState(undefined)
       const [error, setError] = useState(undefined)
       const [busy, setBusy] = useState(false)
-      const [pos, setPos] = useState(() => anchorPos())
+      // 用户摆好的位置（localStorage）优先；有值就固定，不再跟输入框走。
+      const [pinned, setPinned] = useState(() => loadSavedPos())
+      const [pos, setPos] = useState(() => anchorPos(loadSavedPos()))
+      const [dragging, setDragging] = useState(false)
       const panelOpen = usePanelOpen()
       const [onChat, setOnChat] = useState(() => isChatSurface())
       const alive = useRef(true)
       const lastKey = useRef('')
+      const posRef = useRef(pos)
+      posRef.current = pos
+
+      // ref 镜像：sync 回调是 effect 闭包，读不到最新 state。
+      const pinnedRef = useRef(pinned)
+      pinnedRef.current = pinned
+      const dragRef = useRef(undefined)
+
+      /** 拖动结束后统一落位：写 state + 写 localStorage（松手即固定）。 */
+      const dropAt = useCallback(next => {
+        if (alive.current !== true) return
+        const placed = clampPos(next)
+        dragRef.current = undefined
+        setDragging(false)
+        setPinned(placed)
+        pinnedRef.current = placed
+        setPos(placed)
+        savePos(placed)
+      }, [])
+
+      /** 双击胶囊 = 回到默认位（清掉固定，恢复跟随输入框）。 */
+      const resetPos = useCallback(() => {
+        clearSavedPos()
+        dragRef.current = undefined
+        setDragging(false)
+        setPinned(undefined)
+        pinnedRef.current = undefined
+        composerBaseHeight = undefined
+        setPos(anchorPos(undefined))
+      }, [])
+
+      /** 指针按下即可拖：移动超过 3px 才算拖动（否则是点击刷新）。 */
+      const onPointerDown = useCallback(event => {
+        if (event.button !== undefined && event.button !== 0) return
+        const origin = { x: event.clientX, y: event.clientY }
+        const base = { x: pos.x, y: pos.y }
+        dragRef.current = { origin, base, moved: false, id: event.pointerId }
+        try {
+          event.currentTarget.setPointerCapture?.(event.pointerId)
+        } catch {
+          /* 某些宿主会拒；不影响 document 级监听 */
+        }
+      }, [pos.x, pos.y])
+
+      /** 拖拽期间的移动/松手挂在 window 上：指针甩出胶囊也不丢。 */
+      useEffect(() => {
+        const move = event => {
+          const drag = dragRef.current
+          if (drag === undefined) return
+          const dx = event.clientX - drag.origin.x
+          const dy = event.clientY - drag.origin.y
+          if (drag.moved !== true && Math.abs(dx) + Math.abs(dy) < 3) return
+          if (drag.moved !== true) {
+            drag.moved = true
+            setDragging(true)
+          }
+          const next = clampPos({ x: drag.base.x + dx, y: drag.base.y + dy })
+          setPos(next)
+        }
+        const up = () => {
+          const drag = dragRef.current
+          if (drag === undefined) return
+          if (drag.moved === true) {
+            // 位置以当前 state 为准：读 ref 里的最新渲染值。
+            dropAt(posRef.current)
+          } else {
+            dragRef.current = undefined
+          }
+        }
+        window.addEventListener('pointermove', move, true)
+        window.addEventListener('pointerup', up, true)
+        window.addEventListener('pointercancel', up, true)
+        return () => {
+          window.removeEventListener('pointermove', move, true)
+          window.removeEventListener('pointerup', up, true)
+          window.removeEventListener('pointercancel', up, true)
+        }
+      }, [dropAt])
 
       const read = useCallback(async () => {
         const payload = await call('/state')
@@ -1484,7 +1605,7 @@ window.__ModuleLoader__.load({
         const sync = () => {
           raf = 0
           if (alive.current !== true) return
-          const next = anchorPos()
+          const next = anchorPos(pinnedRef.current)
           const key = next.x + ',' + next.y
           if (key === last) return
           last = key
@@ -1603,15 +1724,26 @@ window.__ModuleLoader__.load({
       }
 
       return h('div', {
-        className: 'wbk-float',
+        className: dragging === true ? 'wbk-float wbk-float-dragging' : 'wbk-float',
         style: { left: pos.x + 'px', top: pos.y + 'px' },
         title: hint,
+        // 拖动：按下即抓，移动超过 3px 才算拖（否则照旧是点击刷新）。
+        onPointerDown,
+        // 双击 = 回到默认位并解除固定（恢复跟随输入框）。
+        onDoubleClick: event => {
+          event.stopPropagation()
+          resetPos()
+        },
       },
       h('span', {
         className: low === true ? 'wbk-hb wbk-hb-low' : 'wbk-hb',
         role: 'button',
         tabIndex: 0,
-        onClick: () => void refresh(),
+        // 拖动刚结束的 pointerup 不该触发刷新：看 dragRef 是否刚清掉移动标记。
+        onClick: () => {
+          if (dragRef.current?.moved === true) return
+          void refresh()
+        },
         onKeyDown: event => {
           if (event.key === 'Enter' || event.key === ' ') {
             event.preventDefault()
