@@ -1477,6 +1477,8 @@ window.__ModuleLoader__.load({
       const pinnedRef = useRef(pinned)
       pinnedRef.current = pinned
       const dragRef = useRef(undefined)
+      /** 刚拖完 → 抑制紧随其后的 click（dropAt 已清 dragRef，读不到 moved）。 */
+      const suppressClickRef = useRef(false)
 
       /** 拖动结束后统一落位：写 state + 写 localStorage（松手即固定）。 */
       const dropAt = useCallback(next => {
@@ -1507,11 +1509,9 @@ window.__ModuleLoader__.load({
         const origin = { x: event.clientX, y: event.clientY }
         const base = { x: pos.x, y: pos.y }
         dragRef.current = { origin, base, moved: false, id: event.pointerId }
-        try {
-          event.currentTarget.setPointerCapture?.(event.pointerId)
-        } catch {
-          /* 某些宿主会拒；不影响 document 级监听 */
-        }
+        // 刻意**不**调 setPointerCapture：它会把后续 pointerup/click 的 target
+        // 改写成当前元素，导致里面的 ⚙ 按钮收不到 click（面板打不开）。
+        // pointermove/pointerup 已挂在 window 上，指针甩出胶囊也不会丢。
       }, [pos.x, pos.y])
 
       /** 拖拽期间的移动/松手挂在 window 上：指针甩出胶囊也不丢。 */
@@ -1534,6 +1534,9 @@ window.__ModuleLoader__.load({
           if (drag === undefined) return
           if (drag.moved === true) {
             // 位置以当前 state 为准：读 ref 里的最新渲染值。
+            suppressClickRef.current = true
+            // click 在 pointerup 之后同一轮里派发；下一拍再放开抑制。
+            setTimeout(() => { suppressClickRef.current = false }, 0)
             dropAt(posRef.current)
           } else {
             dragRef.current = undefined
@@ -1739,9 +1742,9 @@ window.__ModuleLoader__.load({
         className: low === true ? 'wbk-hb wbk-hb-low' : 'wbk-hb',
         role: 'button',
         tabIndex: 0,
-        // 拖动刚结束的 pointerup 不该触发刷新：看 dragRef 是否刚清掉移动标记。
+        // 拖动刚结束的 pointerup 不该触发刷新。
         onClick: () => {
-          if (dragRef.current?.moved === true) return
+          if (suppressClickRef.current === true) return
           void refresh()
         },
         onKeyDown: event => {
@@ -1759,6 +1762,17 @@ window.__ModuleLoader__.load({
         role: 'button',
         tabIndex: 0,
         title: tp('hbSettingsHint'),
+        // 齿轮是按钮不是拖拽把手：按下即止，别让外层 div 起拖，
+        // 也别让拖动抑制逻辑挡住这一下点击。
+        onPointerDown: event => {
+          // 只 stopPropagation：preventDefault 会压掉 compatibility mouse events，
+          // 某些宿主下连 click 一起没了。
+          event.stopPropagation()
+          suppressClickRef.current = false
+          dragRef.current = undefined
+        },
+        // 双击齿轮不应该把胶囊位置复位。
+        onDoubleClick: event => event.stopPropagation(),
         onClick: event => {
           event.stopPropagation()
           panelStore.set(panelStore.get() !== true)
