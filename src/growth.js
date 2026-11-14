@@ -106,10 +106,27 @@ function codeOf(payload) {
   return Number.isFinite(numeric) ? numeric : undefined
 }
 
+/**
+ * 宽松数字：上游的数值字段会在 number / string 之间抖动——余额一旦过千，
+ * 计费域的 `*Precise` 变体和某些账号路径会把 `1046` 下发成 `"1,046"`（带千分位逗号）。
+ * `Number("1,046")` 是 NaN，`parseFloat` 得 1——积分直接塌成个位数，
+ * 看起来就是「超过 1000 的余额显示不出来」。这里统一清洗：去逗号/空白/全角数字。
+ */
+function toNumberLoose(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined
+  if (typeof value !== 'string') return undefined
+  const cleaned = value
+    .replace(/[\s,]/g, '')
+    .replace(/[０-９]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
+  if (cleaned === '') return undefined
+  const num = Number(cleaned)
+  return Number.isFinite(num) ? num : undefined
+}
+
 function firstNumber(payload, keys) {
   for (const key of keys) {
-    const value = payload?.[key]
-    if (Number.isFinite(Number(value))) return Number(value)
+    const num = toNumberLoose(payload?.[key])
+    if (num !== undefined) return num
   }
   return undefined
 }
@@ -257,14 +274,14 @@ export function parseResourcePayload(payload) {
   const total = firstNumber(data ?? {}, ['TotalDosage', 'totalDosage'])
   if (rows === undefined && total === undefined) return undefined
   const creditRows = (rows ?? []).filter(row => String(row?.CapacityUnit ?? row?.OriginUnit ?? 'credits').toLowerCase() === 'credits')
-  const remain = creditRows.reduce((sum, row) => sum + (Number(row?.CapacityRemain) || 0), 0)
-  const used = creditRows.reduce((sum, row) => sum + (Number(row?.CapacityUsed) || 0), 0)
+  const remain = creditRows.reduce((sum, row) => sum + (toNumberLoose(row?.CapacityRemain) ?? 0), 0)
+  const used = creditRows.reduce((sum, row) => sum + (toNumberLoose(row?.CapacityUsed) ?? 0), 0)
   const credits = total !== undefined ? total : remain
   const packages = creditRows
     .map(row => ({
       name: typeof row?.PackageName === 'string' ? row.PackageName : undefined,
-      remain: Number(row?.CapacityRemain) || 0,
-      size: Number(row?.CapacitySize) || undefined,
+      remain: toNumberLoose(row?.CapacityRemain) ?? 0,
+      size: toNumberLoose(row?.CapacitySize) ?? undefined,
       expiresAt: typeof row?.ExpiredTime === 'string' ? row.ExpiredTime : undefined,
     }))
     .filter(row => row.remain > 0)

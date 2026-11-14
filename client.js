@@ -333,7 +333,7 @@ window.__ModuleLoader__.load({
 .wbk-textarea { width: 100%; box-sizing: border-box; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.5; padding: 8px 10px; border-radius: 7px; border: 1px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); resize: vertical; }
 .wbk-check { display: flex; align-items: center; gap: 6px; font-size: 11.5px; }
 /* 浮层胶囊：shell.overlay 里 position:fixed，坐标由 HB_POS 定死 */
-.wbk-float { position: fixed; z-index: 60; display: inline-flex; align-items: center; gap: 4px; user-select: none; }
+.wbk-float { position: fixed; max-width: none; overflow: visible; z-index: 60; display: inline-flex; align-items: center; gap: 4px; user-select: none; }
 .wbk-hb { font: inherit; display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 9px; border-radius: 999px; border: 1px solid var(--dsw-alias-border-l3); background: var(--dsw-alias-button-elevated-fill, var(--dsw-alias-bg-layer-1)); color: var(--dsw-alias-label-secondary); cursor: pointer; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .wbk-hb:hover { color: var(--dsw-alias-label-primary); border-color: var(--dsw-alias-brand-primary); background: var(--dsw-alias-button-tool-bar-fill, var(--dsw-alias-bg-layer-1)); }
 .wbk-hb:disabled { cursor: default; opacity: .7; }
