@@ -161,6 +161,8 @@ window.__ModuleLoader__.load({
         hbRefreshed: '余额已刷新：{credits}',
         hbSettingsHint: '打开 WorkBuddy 账号面板',
         panelClose: '关闭',
+        hbLockHint: '拖动可移动 · 双击锁定位置',
+        hbUnlockHint: '已锁定 · 双击解锁并回到默认位置',
       },
       en: {
         'meta.title': 'WorkBuddy accounts',
@@ -292,6 +294,8 @@ window.__ModuleLoader__.load({
         hbRefreshed: 'Balance refreshed: {credits}',
         hbSettingsHint: 'Open the WorkBuddy account panel',
         panelClose: 'Close',
+        hbLockHint: 'Drag to move · double-click to lock',
+        hbUnlockHint: 'Locked · double-click to unlock and reset',
       },
     }
 
@@ -335,6 +339,11 @@ window.__ModuleLoader__.load({
 /* 浮层胶囊：shell.overlay 里 position:fixed，坐标由 HB_POS 定死 */
 .wbk-float { position: fixed; max-width: none; overflow: visible; z-index: 60;
   cursor: grab; touch-action: none; display: inline-flex; align-items: center; gap: 4px; user-select: none; }
+/* 锁定：边框描一圈 + 锁标，和「跟随输入框」的自由态一眼区分。 */
+.wbk-float-locked .wbk-hb { border-style: dashed; }
+.wbk-hb-lock { font-size: 10px; line-height: 1; opacity: .85; margin-right: -1px; }
+.wbk-float-locked { cursor: grab; }
+
 /* 拖动中：手型 + 全局禁选中，免得拖拽时把聊天内容刷蓝。 */
 .wbk-float-dragging { cursor: grabbing; }
 .wbk-float-dragging * { cursor: grabbing !important; user-select: none !important; }
@@ -1492,15 +1501,30 @@ window.__ModuleLoader__.load({
         savePos(placed)
       }, [])
 
-      /** 双击胶囊 = 回到默认位（清掉固定，恢复跟随输入框）。 */
-      const resetPos = useCallback(() => {
-        clearSavedPos()
+      /**
+       * 双击 = 锁定/解锁**切换**：
+       *   · 未锁 → 把当前位置钉死（写 localStorage），从此不跟输入框
+       *   · 已锁 → 解除固定，回到默认位并恢复跟随输入框
+       * 锁定时胶囊右上角出现小锁标，鼠标提示也变。
+       */
+      const toggleLock = useCallback(() => {
         dragRef.current = undefined
         setDragging(false)
-        setPinned(undefined)
-        pinnedRef.current = undefined
-        composerBaseHeight = undefined
-        setPos(anchorPos(undefined))
+        if (pinnedRef.current !== undefined) {
+          // 解锁：清存储 + 回默认位 + 恢复跟随
+          clearSavedPos()
+          setPinned(undefined)
+          pinnedRef.current = undefined
+          composerBaseHeight = undefined
+          setPos(anchorPos(undefined))
+          return
+        }
+        // 锁定：钉在当前位置
+        const placed = clampPos(posRef.current)
+        setPinned(placed)
+        pinnedRef.current = placed
+        setPos(placed)
+        savePos(placed)
       }, [])
 
       /** 指针按下即可拖：移动超过 3px 才算拖动（否则是点击刷新）。 */
@@ -1715,6 +1739,7 @@ window.__ModuleLoader__.load({
           }),
         low === true ? tp('hbLow', { name: active?.nickname ?? '—', credits: shown, floor }) : undefined,
         error === undefined ? undefined : tp('hbError', { reason: error }),
+        locked ? tp('hbUnlockHint') : tp('hbLockHint'),
       ].filter(Boolean).join('\n')
 
       // 不在聊天界面就整块不渲染（连带菜单一起消失）
@@ -1726,16 +1751,22 @@ window.__ModuleLoader__.load({
           h('span', { className: 'wbk-hb-err', title: tp('hbError', { reason: error }) }, tp('hbError', { reason: error })))
       }
 
+      const locked = pinned !== undefined
+      const floatClass = [
+        'wbk-float',
+        dragging === true ? 'wbk-float-dragging' : '',
+        locked ? 'wbk-float-locked' : '',
+      ].filter(Boolean).join(' ')
       return h('div', {
-        className: dragging === true ? 'wbk-float wbk-float-dragging' : 'wbk-float',
+        className: floatClass,
         style: { left: pos.x + 'px', top: pos.y + 'px' },
         title: hint,
         // 拖动：按下即抓，移动超过 3px 才算拖（否则照旧是点击刷新）。
         onPointerDown,
-        // 双击 = 回到默认位并解除固定（恢复跟随输入框）。
+        // 双击 = 锁定 / 解锁 切换。
         onDoubleClick: event => {
           event.stopPropagation()
-          resetPos()
+          toggleLock()
         },
       },
       h('span', {
@@ -1755,6 +1786,8 @@ window.__ModuleLoader__.load({
         },
       },
       h('span', { className: busy ? 'wbk-hb-dot wbk-hb-dot-busy' : 'wbk-hb-dot' }),
+      // 锁定时在数字前面挂一枚小锁，一眼看出「这个位置已经钉死」。
+      locked ? h('span', { className: 'wbk-hb-lock', title: tp('hbUnlockHint') }, '\u{1F512}') : null,
       h('span', { className: 'wbk-hb-num' }, busy ? tp('hbLoading') : String(shown)),
       h('span', { className: 'wbk-hb-unit' }, tp('hbLabel')),
       h('span', {
