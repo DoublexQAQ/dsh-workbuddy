@@ -1282,6 +1282,17 @@ window.__ModuleLoader__.load({
      *
      * @returns {Array<{name: string, ok: boolean, effect: string}>}
      */
+    /**
+     * 胶囊/刷新要盯的账号 = 最近激活的那个 active。
+     * 每个路由各有一个 active；find(a => a.active === true) 命中的是数组顺序
+     * 第一个——切了国内当前后它仍返回海外那个，缓存 key 不变 → 界面不刷新，
+     * 点刷新刷的还是错账号。lastActiveAt 由 activate() 打时间戳。
+     */
+    function mostRecentActive(rows) {
+      const actives = (rows ?? []).filter(row => row.active === true)
+      return [...actives].sort((a, b) => (b.lastActiveAt ?? 0) - (a.lastActiveAt ?? 0))[0]
+    }
+
     function hostContractReport() {
       if (typeof document === 'undefined') return []
       const checks = [
@@ -1421,7 +1432,7 @@ window.__ModuleLoader__.load({
         const payload = await call('/state')
         if (alive.current !== true) return
         // 5 秒一轮，值没变就别触发重渲染（比的是「当前账号 + 它的余额 + 号池总数」）
-        const active = (payload?.accounts ?? []).find(a => a.active === true)
+        const active = mostRecentActive(payload?.accounts)
         const key = active === undefined
           ? '—'
           : active.id + ':' + String(active.credits) + ':' + String(active.creditsAt) + ':' + (payload.accounts?.length ?? 0)
@@ -1545,7 +1556,7 @@ window.__ModuleLoader__.load({
       const refresh = useCallback(async () => {
         setBusy(true)
         try {
-          const active = view?.accounts?.find(account => account.active === true)
+          const active = mostRecentActive(view?.accounts)
           await call('/credits', { body: active === undefined ? {} : { id: active.id } })
           await read()
         } catch (reason) {
@@ -1557,8 +1568,12 @@ window.__ModuleLoader__.load({
 
 
       const accounts = view?.accounts ?? []
-      const active = accounts.find(account => account.active === true)
-      const total = view?.totals?.codebuddy?.credits
+      // 每个路由各有一个 active；胶囊跟「最近激活」的那个走——刚切完号立刻对。
+      const activeAccounts = accounts.filter(account => account.active === true)
+      const active = mostRecentActive(accounts)
+      // 合计跟着当前账号的平台走：切到国际号就显示国际合计，不是永远国内。
+      const total = (active === undefined ? undefined : view?.totals?.[active.route === 'workbuddy' ? 'workbuddy' : 'codebuddy']?.credits)
+        ?? view?.totals?.codebuddy?.credits
       const credits = typeof active?.credits === 'number' ? active.credits : undefined
       const floor = view?.creditFloor
       const low = typeof credits === 'number' && typeof floor === 'number' && floor > 0 && credits < floor
@@ -1566,6 +1581,14 @@ window.__ModuleLoader__.load({
 
       const hint = [
         tp('hbTitle', { name: active?.nickname ?? '—', credits: shown, count: accounts.length, total: Math.round(total ?? 0) }),
+        // 跨路由各有当前账号时逐个点名，别让人猜「这数字是谁的」。
+        ...activeAccounts
+          .filter(row => row.id !== active?.id)
+          .map(row => {
+            const label = row.route === 'workbuddy' ? '国际' : '国内'
+            const value = Number.isFinite(Number(row.credits)) ? Math.round(Number(row.credits)) : '—'
+            return `当前（${label}）${row.nickname ?? row.uid ?? row.id}：${value} 积分`
+          }),
         low === true ? tp('hbLow', { name: active?.nickname ?? '—', credits: shown, floor }) : undefined,
         error === undefined ? undefined : tp('hbError', { reason: error }),
       ].filter(Boolean).join('\n')

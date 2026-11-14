@@ -349,7 +349,8 @@ export class AccountsStore {
     return true
   }
 
-  /** 切换当前账号（同路由内切换）。 */
+  /** 切换当前账号（同路由内切换）。lastActiveAt 给胶囊用：跨路由各有 active 时，
+   *  界面显示「最近激活」的那个，切完立刻跟手。 */
   activate(id) {
     const target = this.byId(id)
     if (target === undefined) return false
@@ -357,6 +358,7 @@ export class AccountsStore {
       if (account.route === target.route) account.active = account.id === id
     }
     if (target.enabled === false) target.enabled = true
+    target.lastActiveAt = Date.now()
     this.save()
     return true
   }
@@ -631,6 +633,7 @@ export class AccountsStore {
       nickname: account.nickname ?? null,
       active: account.active === true,
       enabled: account.enabled !== false,
+      lastActiveAt: account.lastActiveAt,
       creditLow: this.belowFloor(account),
       expiresAt: account.auth?.expiresAt ?? null,
       hasRefreshToken: typeof account.auth?.refreshToken === 'string' && account.auth.refreshToken !== '',
@@ -746,6 +749,7 @@ function normalizeAccount(row) {
     },
     active: row.active === true,
     enabled: row.enabled !== false,
+    lastActiveAt: Number(row.lastActiveAt) || undefined,
     addedAt: Number(row.addedAt) || Date.now(),
     lastLoginAt: Number(row.lastLoginAt) || undefined,
     credits: Number.isFinite(Number(row.credits)) ? Number(row.credits) : undefined,
