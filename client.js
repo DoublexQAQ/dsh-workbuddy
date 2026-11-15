@@ -1672,7 +1672,9 @@ window.__ModuleLoader__.load({
           if (typeof document !== 'undefined' && document.hidden !== true) read().catch(() => {})
         }
         if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisible)
-        const onResize = () => { setPos(anchorPos()) }
+        // 窗口变化时必须带上 pinned：锁定的胶囊只做防出界，绝不回落到
+        // 「跟随输入框」的默认位（早先漏传参数，一 resize 锁定位置就丢）。
+        const onResize = () => { setPos(anchorPos(pinnedRef.current)) }
         window.addEventListener('resize', onResize)
         return () => {
           alive.current = false
