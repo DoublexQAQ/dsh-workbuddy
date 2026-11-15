@@ -116,6 +116,37 @@ hunyuan-2.0-thinking · ×0.04   Default · ×2.2
 账号列表**分两栏**：「国内账号」一栏、「海外账号」一栏，各自有当前标记与操作按钮，
 互不混排；顶部总积分也按平台分列。
 
+### 成长任务自动化（新增）
+
+设置页勾上「自动做成长任务」，每日闭环里就会多跑一段：**接取 → 进度达标 → 领取**。
+账号行上还有一个「做任务」按钮，随时手动跑一次当前账号。
+
+状态机就是上游那套：`not_accepted --accept--> accepted --(进度达标)--> completed --claim--> claimed`。
+
+几条硬规则：
+
+- **付费任务永不触碰**：捐款 / 捐赠 / 公益 / 充值 / 付费 / 购买 / 订阅 / 支付（以及
+  `Expert_Philanthropy` 这个已知 code）一律**不接取、不领取**。这是一票否决，先于任何
+  网络动作，也不受开关影响——开关只管「做不做免费任务」。
+- **不伪造进度**：进度没到的任务只报告「需先在客户端完成」，然后等你在官方客户端做完，
+  下次跑就会自动领。
+- **重复接取不是失败**：上游对已接过的任务回 `status: "error"`，那是幂等回执，归一成
+  「已接取（此前已接过）」，不会污染失败统计。
+- **分日解锁照实说**：`task locked until YYYY-MM-DD` 归到「未解锁（X 开启）」，不算错。
+- 幂等良性回复（already claimed / not completed / expired / locked / 未完成 / 已领取）
+  一律算跳过，不算失败。单任务失败不影响其它任务。
+
+接口（实测核对，与生态里多个同实现一致）：
+
+| 用途 | 路径 |
+|---|---|
+| 任务列表 | `GET /v2/activity/growth/tasks` |
+| 接取 | `POST /activity/growth/tasks/accept`（body `{ task_codes: [code] }`） |
+| 领取 | `POST /activity/growth/tasks/{code}/claim` |
+| 成长等级（可选） | `GET /v2/activity/growth/profile` |
+
+配置项：`autoTasks: true` 打开（默认关）；`skipTasks: ['某code']` 额外跳过指定任务。
+
 时间点与开关都能改（见下）。
 
 ## 常用设置
@@ -138,7 +169,9 @@ hunyuan-2.0-thinking · ×0.04   Default · ×2.2
     checkinHours: [9, 21]            # 签到时点（北京时间，整点）
     autoActivity: true               # 每天自动上报活跃（点亮连登）
     activityHours: [10]
-    autoGrowth: true                 # 顺带兑换连登档位 + 抽奖（只涨积分）
+    autoGrowth: true                  # 顺带兑换连登档位 + 抽奖（只涨积分）
+    autoTasks: false                  # 自动做成长任务（接取+领取）；付费任务永远跳过
+    skipTasks: []                     # 额外跳过的任务 code
     traceOutbound: false             # true = 把每次出站摘要写到 ~/.dsh-workbuddy/outbound.jsonl
 ```
 

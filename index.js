@@ -27,6 +27,7 @@ import { IdentityStore } from './src/identity.js'
 import { normalizeImportInput, prepareImportRows } from './src/import.js'
 import { SessionStore, unwrapAuth } from './src/session.js'
 import { growthStreak, lotterySummary, redeemTier, reportActivity, runDailyGrowth, userResource } from './src/growth.js'
+import { runGrowthTasks } from './src/tasks.js'
 import { DailyScheduler, cstParts } from './src/schedule.js'
 import { PLATFORMS, ROUTES as ALL_ROUTES, UPSTREAM_CODES } from './src/platform.js'
 import { warmUp } from './src/dnsfix.js'
@@ -100,6 +101,13 @@ const DEFAULTS = Object.freeze({
   autoActivity: true,
   activityHours: [10],
   autoGrowth: true,
+  /**
+   * 自动做成长任务：接取 + 领取。默认关（要显式打开才动任务）；
+   * 付费任务（捐款/公益/充值/订阅）无论开关如何都永不接取、永不领取。
+   */
+  autoTasks: false,
+  /** 额外跳过的任务 code 列表。 */
+  skipTasks: [],
   checkinBases: undefined,
   maxLotteryDraws: 20,
   /** 上游模型目录的缓存时长／要从选择器里隐藏的模型 id。 */
@@ -170,6 +178,8 @@ export function apply(ctx, config) {
       autoActivity: settings.autoActivity !== false,
       activityHours: settings.activityHours,
       autoGrowth: settings.autoGrowth !== false,
+      autoTasks: settings.autoTasks === true,
+      skipTasks: Array.isArray(settings.skipTasks) ? settings.skipTasks : [],
       modelChain: Array.isArray(settings.modelChain) ? settings.modelChain : [],
       modelChainEnabled: settings.modelChainEnabled !== false,
       modelBudgetEnabled: settings.modelBudgetEnabled !== false,
@@ -335,6 +345,12 @@ export function apply(ctx, config) {
     get autoActivity() {
       return accounts.settings.autoActivity !== false
     },
+    get autoTasks() {
+      return accounts.settings.autoTasks === true
+    },
+    get skipTasks() {
+      return Array.isArray(accounts.settings.skipTasks) ? accounts.settings.skipTasks : []
+    },
   }
 
   /**
@@ -384,6 +400,54 @@ export function apply(ctx, config) {
           const activity = await reportActivity({ session: credentials, config: growthConfig })
           accounts.update(target.id, { lastActivity: { at: Date.now(), ok: activity.ok === true, message: activity.message } })
           results.push({ id: target.id, name: label, kind, ok: activity.ok === true, message: activity.message })
+          continue
+        }
+        if (kind === 'tasks') {
+          // 手动跑一次成长任务：接取 + 领取（进度未达只报告）。
+          const tasksRun = await runGrowthTasks({
+            session: credentials,
+            deviceToken,
+            config: growthConfig,
+            skipTasks: growthConfig.skipTasks,
+          })
+          const at = Date.now()
+          accounts.update(target.id, {
+            lastTasks: {
+              at,
+              ok: tasksRun.ok === true,
+              claimed: tasksRun.claimed ?? 0,
+              accepted: tasksRun.accepted ?? 0,
+              creditGot: tasksRun.creditGot ?? 0,
+              total: tasksRun.total ?? 0,
+              message: tasksRun.ok === true
+                ? `共 ${tasksRun.total} 项：领取 ${tasksRun.claimed}、接取 ${tasksRun.accepted}、+${tasksRun.creditGot} 积分`
+                : (tasksRun.message ?? `失败 ${(tasksRun.failed ?? []).length} 项`),
+              steps: (tasksRun.steps ?? []).slice(0, 60),
+              tasks: (tasksRun.tasks ?? []).map(row => ({
+                code: row.code,
+                title: row.title,
+                status: row.status,
+                current: row.current,
+                target: row.target,
+                claimed: row.claimed,
+                paid: row.paid,
+                rewardCredit: row.rewardCredit,
+              })).slice(0, 60),
+            },
+          })
+          results.push({
+            id: target.id,
+            name: label,
+            kind,
+            ok: tasksRun.ok === true,
+            claimed: tasksRun.claimed ?? 0,
+            accepted: tasksRun.accepted ?? 0,
+            creditGot: tasksRun.creditGot ?? 0,
+            total: tasksRun.total ?? 0,
+            skipped: tasksRun.skipped ?? [],
+            failed: tasksRun.failed ?? [],
+            message: tasksRun.message ?? `领取 ${tasksRun.claimed ?? 0} 项`,
+          })
           continue
         }
         if (kind === 'growth') {

@@ -89,6 +89,15 @@ window.__ModuleLoader__.load({
         autoActivity: '每天自动上报活跃（点亮连登）',
         autoGrowth: '顺带兑换连登档位与抽奖',
         autoRedeem: '自动兑换：刷新成长发现「可兑」档位时当场全部兑掉',
+        autoTasks: '自动做成长任务（接取 + 领取；付费任务永不触碰）',
+        tasksNow: '做任务',
+        tasksRunning: '做任务中…',
+        tasksResult: '成长任务',
+        tasksSummary: '共 {total} 项 · 领取 {claimed} · 接取 {accepted} · +{credit} 积分',
+        tasksNeverRun: '还没跑过',
+        tasksPaidSkip: '付费任务已跳过：{list}',
+        tasksPending: '待完成：{list}',
+        tasksFailed: '失败 {count} 项：{list}',
         growthStreak: '连登',
         growthRedeem: '兑换',
         growthLottery: '抽奖',
@@ -222,6 +231,15 @@ window.__ModuleLoader__.load({
         autoActivity: 'Report daily activity (lights the streak)',
         autoGrowth: 'Also redeem streak tiers and draw the lottery',
         autoRedeem: 'Auto-redeem unlocked streak tiers on every growth refresh',
+        autoTasks: 'Automate growth tasks (accept + claim; paid tasks are never touched)',
+        tasksNow: 'Run tasks',
+        tasksRunning: 'Running tasks…',
+        tasksResult: 'Growth tasks',
+        tasksSummary: '{total} total · claimed {claimed} · accepted {accepted} · +{credit} credits',
+        tasksNeverRun: 'not run yet',
+        tasksPaidSkip: 'skipped paid tasks: {list}',
+        tasksPending: 'pending in client: {list}',
+        tasksFailed: '{count} failed: {list}',
         growthStreak: 'Streak',
         growthRedeem: 'Redeem',
         growthLottery: 'Lottery',
@@ -735,6 +753,7 @@ window.__ModuleLoader__.load({
                 : h('button', { className: 'wbk-btn', disabled: busy !== undefined, onClick: () => void act('/activate', { id: account.id }, 'activate') }, t('setActive')),
               h('button', { className: 'wbk-btn', disabled: busy !== undefined, onClick: () => void act('/checkin', { id: account.id }, 'checkin') }, t('checkinNow')),
               h('button', { className: 'wbk-btn', disabled: busy !== undefined, onClick: () => void act('/growth', { id: account.id }, 'growth') }, t('refreshGrowth')),
+              h('button', { className: 'wbk-btn', disabled: busy !== undefined, onClick: () => void act('/tasks', { id: account.id }, 'tasks') }, busy === 'tasks' ? t('tasksRunning') : t('tasksNow')),
               h('button', { className: 'wbk-btn', disabled: busy !== undefined, onClick: () => void act('/credits', { id: account.id }, 'credits') }, t('credits')),
               h('button', { className: 'wbk-btn', disabled: busy !== undefined, onClick: () => void act('/refresh', { id: account.id }, 'refresh') }, t('refreshToken')),
               h('button', {
@@ -768,7 +787,38 @@ window.__ModuleLoader__.load({
             h('span', { className: 'wbk-kv' },
               h('b', null, t('growthCredits')), ' ', account.credits === undefined ? t('growthNone') : account.credits),
             h('span', { className: account.daily?.checkin !== undefined ? 'wbk-msg-ok' : '' },
-              `${t('todayCheckin')}：${account.daily?.checkin !== undefined ? t('yes') : t('no')}`)))
+              `${t('todayCheckin')}：${account.daily?.checkin !== undefined ? t('yes') : t('no')}`)),
+          // 成长任务最近一次结果：有就跑过，没有就明说没跑过。
+          h('div', { className: 'wbk-msg wbk-sub' },
+            h('b', null, t('tasksResult')), ' ',
+            account.lastTasks === undefined
+              ? t('tasksNeverRun')
+              : t('tasksSummary', {
+                  total: account.lastTasks.total ?? 0,
+                  claimed: account.lastTasks.claimed ?? 0,
+                  accepted: account.lastTasks.accepted ?? 0,
+                  credit: account.lastTasks.creditGot ?? 0,
+                })),
+          // 付费被跳过 / 待客户端完成 / 失败：逐类点名，别让人以为全都没做。
+          (account.lastTasks?.steps ?? []).some(step => step.status === 'skip_paid')
+            ? h('div', { className: 'wbk-msg wbk-sub' },
+                t('tasksPaidSkip', {
+                  list: (account.lastTasks.tasks ?? []).filter(row => row.paid === true).map(row => row.title || row.code).join('、'),
+                }))
+            : null,
+          (account.lastTasks?.steps ?? []).filter(step => step.step === 'wait_progress').length > 0
+            ? h('div', { className: 'wbk-msg wbk-sub' },
+                t('tasksPending', {
+                  list: (account.lastTasks.steps ?? []).filter(step => step.step === 'wait_progress').map(step => step.code).slice(0, 8).join('、'),
+                }))
+            : null,
+          (account.lastTasks?.steps ?? []).filter(step => step.status === 'fail').length > 0
+            ? h('div', { className: 'wbk-msg wbk-msg-err' },
+                t('tasksFailed', {
+                  count: (account.lastTasks.steps ?? []).filter(step => step.status === 'fail').length,
+                  list: (account.lastTasks.steps ?? []).filter(step => step.status === 'fail').map(step => step.code + '：' + (step.message ?? '')).slice(0, 4).join('；'),
+                }))
+            : null)
       }
 
       const submitImport = async () => {
@@ -1166,6 +1216,14 @@ window.__ModuleLoader__.load({
               }),
               t('autoRedeem'))),
           h('div', { className: 'wbk-field' },
+            h('label', { className: 'wbk-check' },
+              h('input', {
+                type: 'checkbox',
+                checked: settings.autoTasks === true,
+                onChange: event => setState(current => ({ ...current, settings: { ...current.settings, autoTasks: event.target.checked } })),
+              }),
+              t('autoTasks'))),
+          h('div', { className: 'wbk-field' },
             h('span', null, t('hours')),
             h('input', { className: 'wbk-input', value: hours, onChange: event => setHours(event.target.value) })),
           h('div', { className: 'wbk-field' },
@@ -1180,6 +1238,7 @@ window.__ModuleLoader__.load({
                 autoActivity: settings.autoActivity !== false,
                 autoGrowth: settings.autoGrowth !== false,
                 autoRedeem: settings.autoRedeem !== false,
+                autoTasks: settings.autoTasks === true,
                 checkinHours: parseHours(hours, settings.checkinHours ?? [9, 21]),
                 activityHours: parseHours(activityHours, settings.activityHours ?? [10]),
               }, 'settings').then(payload => { if (payload !== undefined) setMessage({ tone: 'ok', text: t('saved') }) }),

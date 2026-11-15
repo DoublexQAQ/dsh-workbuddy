@@ -22,6 +22,7 @@
 
 import { jsonRequest } from './http.js'
 import { extractMessage, unwrapEnvelope } from './identity.js'
+import { runGrowthTasks } from './tasks.js'
 import { CN_USER_AGENT, PLATFORMS } from './platform.js'
 
 /** 签到 / 余额域：首选域名不通时回落。 */
@@ -599,6 +600,18 @@ export async function runDailyGrowth({ session, deviceToken, config = {}, signal
         result.lottery = { times: summary.times ?? 0, draws: [] }
       }
     }
+  }
+
+  // 成长任务：接取 + 领取。进度未达的只报告「需在客户端完成」，绝不伪造。
+  // 放在活跃上报之前——有些任务把「发一条对话」当进度，先上报能顺带点亮。
+  if (platform === 'codebuddy' && config.autoTasks === true) {
+    result.tasks = await runGrowthTasks({
+      session,
+      deviceToken,
+      config,
+      signal,
+      skipTasks: Array.isArray(config.skipTasks) ? config.skipTasks : [],
+    })
   }
 
   if (platform === 'codebuddy' && config.autoActivity !== false) {

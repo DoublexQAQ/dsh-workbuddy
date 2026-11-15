@@ -56,6 +56,13 @@ export const DEFAULT_DAILY_SETTINGS = Object.freeze({
    */
   autoRedeem: true,
   /**
+   * 自动做成长任务：接取 + 进度达标的立即领取。付费任务（捐款/公益/充值/订阅）
+   * 永远跳过，不受此开关影响——那是铁律，不是选项。
+   */
+  autoTasks: false,
+  /** 用户额外跳过的任务 code（命中就不接不领）。 */
+  skipTasks: Object.freeze([]),
+  /**
    * 积分闸门阈值：用户自己填的数，已知余额低于它的账号自动跳过并换号；
    * 全部低于就停止使用（签到回血后自动恢复）。`0` = 关闭闸门。
    */
@@ -571,6 +578,10 @@ export class AccountsStore {
     }
     if (typeof patch.modelChainEnabled === 'boolean') next.modelChainEnabled = patch.modelChainEnabled
     if (typeof patch.autoRedeem === 'boolean') next.autoRedeem = patch.autoRedeem
+    if (typeof patch.autoTasks === 'boolean') next.autoTasks = patch.autoTasks
+    if (Array.isArray(patch.skipTasks)) {
+      next.skipTasks = [...new Set(patch.skipTasks.map(value => String(value).trim()).filter(value => value !== ''))].slice(0, 50)
+    }
     // 积分闸门：用户自己填的数（0 = 关闭）。负数按 0 处理，别静默丢掉整条更新。
     if (patch.creditFloor !== undefined) {
       const floor = Number(patch.creditFloor)
@@ -649,6 +660,8 @@ export class AccountsStore {
       daily: account.daily ?? {},
       lastCheckin: account.lastCheckin,
       lastActivity: account.lastActivity,
+      // 成长任务最近一次执行结果：领取数 / 接取数 / 拿到多少积分 / 逐项状态。
+      lastTasks: account.lastTasks,
       creditLog: Array.isArray(account.creditLog) ? account.creditLog.slice(-10) : [],
       // 今日各模型已花积分（纯展示，不参与切号）。
       todayModelSpend: account.modelUsage?.date === cstDay()
@@ -763,6 +776,7 @@ function normalizeAccount(row) {
     daily: row.daily !== null && typeof row.daily === 'object' ? { ...row.daily } : {},
     lastCheckin: row.lastCheckin ?? undefined,
     lastActivity: row.lastActivity ?? undefined,
+    lastTasks: row.lastTasks ?? undefined,
     lastUsage: row.lastUsage ?? undefined,
     creditLog: Array.isArray(row.creditLog) ? row.creditLog.slice(-30) : [],
     // 功能 1 的账本：{ date: 'YYYY-MM-DD'(北京), [model]: 当日累计消耗 }

@@ -141,7 +141,7 @@ export class LoginCoordinator {
  * @param {import('./accounts.js').AccountsStore} deps.accounts
  * @param {Record<string, LoginCoordinator>} deps.logins - 每个平台路由一个协调器（codebuddy / workbuddy）
  * @param {(platform: string) => string} [deps.routeNameFor] - 平台 -> 实际注册路由名（routeNames 覆盖后）
- * @param {(options: {account?: object, kind: 'checkin'|'credits'|'refresh'|'activity'|'growth'}) => Promise<object>} deps.runTask
+ * @param {(options: {account?: object, kind: 'checkin'|'credits'|'refresh'|'activity'|'growth'|'tasks'}) => Promise<object>} deps.runTask
  * @param {(options?: {force?: boolean}) => Promise<{rows: object[], error?: string, at: number}>} [deps.catalog]
  * @param {(rows: object[]) => {imported: number, skipped: object[]}} [deps.importAccounts] - 导入 JSON 凭据
  * @param {() => void} [deps.invalidate] - 账号集变化后清缓存（目录/路由可用性）
@@ -301,6 +301,13 @@ export function createApiHandler(deps) {
       // 只读刷新成长数据：连登天数 / 档位状态 / 抽奖次数。不签到、不兑换、不抽奖。
       if (method === 'POST' && route === '/growth') {
         const result = await runTask({ account: body.id === undefined ? undefined : accounts.byId(String(body.id)), kind: 'growth' })
+        sendJson(res, 200, { ok: true, result, ...accounts.view() })
+        return
+      }
+
+      // 成长任务自动化：接取 + 领取。付费任务永不触碰（引擎里的一票否决）。
+      if (method === 'POST' && route === '/tasks') {
+        const result = await runTask({ account: body.id === undefined ? undefined : accounts.byId(String(body.id)), kind: 'tasks' })
         sendJson(res, 200, { ok: true, result, ...accounts.view() })
         return
       }
