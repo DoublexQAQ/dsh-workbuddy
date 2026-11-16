@@ -240,3 +240,56 @@ export function toToolDefs(tools) {
 export function needsVision(messages) {
   return (messages ?? []).some(message => blocksOf(message.content).some(block => block?.type === 'image'))
 }
+
+/**
+ * 上游对 **user 消息的内容非空**有硬校验：`content: []` 或 `content: [{text:''}]`
+ * 会被判 `HTTP 400 · a message has empty content, please check the conversation
+ * history and retry`（实测 2026-11-16，国内域；国际域宽松不报）。
+ *
+ * 触发路径不止「用户真发了空消息」——更常见的是历史里某条消息被清洗掏空、
+ * 或投影时只剩图片块被丢弃（本路由暂不做视觉内联）。所以发出去之前一律补位：
+ *
+ *   1. 任何空的 user 消息 → 换成占位文本，让会话能继续；
+ *   2. 整个数组一条 user 都没有（全被投影丢掉）→ 末尾补一条占位 user，
+ *      否则上游只会看到 system，同样判空。
+ *
+ * assistant 的空消息不用管：投影层已经把「无文本且无调用」的 assistant 丢掉了，
+ * 上游也只对 user 严格。
+ *
+ * @param {Array<object>} messages - 投影后的上游消息
+ * @returns {Array<object>} 保证非空的副本（不修改入参）
+ */
+export const EMPTY_USER_PLACEHOLDER = '(the client sent an empty message — please continue the conversation)'
+
+function contentIsEmpty(content) {
+  if (typeof content === 'string') return content.trim() === ''
+  if (Array.isArray(content)) {
+    return content.every(block => block?.type !== 'text'
+      || typeof block.text !== 'string'
+      || block.text.trim() === '')
+  }
+  return true
+}
+
+export function padEmptyMessages(messages) {
+  const out = []
+  for (const message of messages ?? []) {
+    if (message?.role !== 'user') {
+      out.push(message)
+      continue
+    }
+    if (contentIsEmpty(message.content)) out.push({ role: 'user', content: EMPTY_USER_PLACEHOLDER })
+    else out.push(message)
+  }
+  // 补位后仍然一条 user 都没有（输入里根本没有 user）：补一条，
+  // 别让 body.messages 只剩 system —— 上游同样判空。
+  if (out.some(message => message?.role === 'user') !== true) {
+    out.push({ role: 'user', content: EMPTY_USER_PLACEHOLDER })
+  }
+  return out
+}
+
+/** 上游这句 400 的识别（用于兜底重发）。 */
+export function isEmptyContentRejection(message) {
+  return /empty content|messages?\b.*\bempty|must not be empty/i.test(String(message ?? ''))
+}

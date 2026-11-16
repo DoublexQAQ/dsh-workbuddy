@@ -1,6 +1,6 @@
 {
   "name": "dsh-workbuddy",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "private": true,
   "type": "module",
   "description": "把 WorkBuddy / CodeBuddy 订阅接进 DSH：官方客户端指纹出站、多账号池、模型轮换链（自选 3-4 个模型按序 fallback）、积分闸门（自定阈值，低于即换号）、北京时区每日签到/活跃/兑换/抽奖/成长任务自动化（接取+领取，付费任务永不触碰），聊天界面可拖拽锁定的浮动积分胶囊 + ⚙ 一键开账号面板。",

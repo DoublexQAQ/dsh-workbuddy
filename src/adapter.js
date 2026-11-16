@@ -22,7 +22,7 @@ import { buildHeaders, isBalanceExhausted } from './identity.js'
 import { displayDescription, displayName } from './catalog.js'
 import { DegradeWindow, NEUTRAL_SYSTEM, isSecurityRejection, neutralizeChatBody } from './prompt.js'
 import { openStream, TransportError } from './http.js'
-import { needsVision, repairToolPairing, toChatMessages, toToolDefs } from './messages.js'
+import { needsVision, padEmptyMessages, repairToolPairing, toChatMessages, toToolDefs } from './messages.js'
 import { sanitizeOutbound } from './sanitize.js'
 import { readChatStream } from './stream.js'
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_OUTPUT, EFFORT_MAP, PLATFORMS } from './platform.js'
@@ -344,9 +344,12 @@ export class WorkBuddyAdapter {
     }
 
     const chain = identity.chainFor(options.sessionId, this.deps.config.conversationIdFormat)
+    // 国内域实测硬校验（2026-11-16）：user 消息 content 为空（`[]` 或 `[{text:''}]`）
+    // 直接 400 `a message has empty content`。清洗掏空、图片块被丢弃都会造成这种形状，
+    // 而且一旦进了持久历史就会**每轮都 400**。发出去之前统一补位。
     const body = {
       model: entry?.id ?? model,
-      messages,
+      messages: padEmptyMessages(messages),
       stream: true,
     }
     // 官方客户端用会话 id + previous_response_id 串同一条对话；这也是上游做额度/风控计账的键。
