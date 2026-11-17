@@ -56,7 +56,13 @@ const DEFAULTS = Object.freeze({
   loginPollIntervalMs: 1_500,
   loginOnStart: false,
   requestTimeoutMs: 120_000,
-  gzipThresholdBytes: 4_096,
+  /**
+   * 请求体压缩阈值。`0` = 不压缩（默认，也建议保持默认）：上游网关不解 gzip，
+   * 压缩体会被判 `400 Invalid gzip body` 或 `Unmarshal chat params failed
+   * ('\x1f')`，且不同后端节点行为不一致（混合集群）——发 gzip 等于碰运气。
+   * 明文 64 KB 每个节点都过。设成正数才会按官方客户端行为压缩。
+   */
+  gzipThresholdBytes: 0,
   keepAlive: true,
   autoRefresh: true,
   /** 当前账号被拒时自动切到下一个启用账号。 */

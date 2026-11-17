@@ -7,9 +7,9 @@
  * Node 只会补传输必需的 `Host` / `Connection`，不会再塞任何指纹。
  *
  * 另外：
- * - **不用系统代理**。mitmproxy 之类的宿主代理会重写头，正好毁掉指纹一致性；
+ * - **请求体不压缩**。上游网关不解 gzip（实测 400 `Invalid gzip body` /
+ *   `Unmarshal chat params failed: invalid character '\x1f'`），见 DEFAULT_GZIP_THRESHOLD。
  *   需要代理时由 `proxyUrl` 显式指定（显式代理本身也会被计数，配置里默认关）。
- * - **大体积请求体按官方客户端的行为 gzip**，并把 `content-encoding` 放进头表。
  * - SSE 按行切，`data:` 载荷逐条交给上层；`[DONE]` 由上层判定。
  *
  * @module src/http.js
@@ -23,8 +23,20 @@ import { URL } from 'node:url'
 import { toFailure } from './identity.js'
 import { pinnedLookup } from './dnsfix.js'
 
-/** 超过这个体积才压缩（官方客户端也只是对大请求体压缩）。 */
-export const DEFAULT_GZIP_THRESHOLD = 4096
+/**
+ * 请求体压缩阈值。**默认 0 = 不压缩**。
+ *
+ * 实测（2026-11-17，直连 `/v2/chat/completions`）：上游网关**不接收 gzip 请求体**。
+ * 压缩后的 body 被直接当 JSON 解析，gzip 魔数 `1f 8b` 的首字节 `\x1f` 触发
+ * `HTTP 400 · Unmarshal chat params failed: invalid character '\x1f' …`，
+ * 另一批节点回 `HTTP 400 · Invalid gzip body`——同一件事的两种说法，说明这是个
+ * **混合集群**：部分节点会解压、部分不会，发 gzip 等于碰运气。
+ * 明文 64 KB 的请求体每个节点都过。所以这里默认一律明文，别拿可用性赌指纹。
+ *
+ * 真要按官方客户端行为压（比如哪天确认整集群都解压），把 `gzipThresholdBytes`
+ * 设成正数即可恢复；响应侧的 gzip/br 解码不受这里影响（那是正常的响应压缩）。
+ */
+export const DEFAULT_GZIP_THRESHOLD = 0
 
 /** 瞬时 DNS 失败会在内部自动重试（最多重试这么多次，共 n+1 次尝试）。 */
 export const DEFAULT_DNS_RETRIES = 2
@@ -109,9 +121,11 @@ export function send(input) {
   const plain = raw === undefined ? undefined : typeof raw === 'string' ? Buffer.from(raw, 'utf8') : raw
   let payload = plain
   const outgoing = { ...headers }
-  // 压缩判据：配置的阈值 + 官方客户端只压大请求体这个行为。
+  // 压缩判据：阈值必须是**正数**才启用（`0` = 关闭，绝不能是「>= 0 恒真」）。
+  // 默认关闭：上游网关不解 gzip，见 DEFAULT_GZIP_THRESHOLD 的说明。
+  const threshold = Number(gzipThresholdBytes)
   let gzipUsed = false
-  if (plain !== undefined && plain.length >= gzipThresholdBytes) {
+  if (plain !== undefined && Number.isFinite(threshold) && threshold > 0 && plain.length >= threshold) {
     payload = zlib.gzipSync(plain)
     outgoing['content-encoding'] = 'gzip'
     gzipUsed = true
@@ -199,10 +213,28 @@ export function send(input) {
   })
 }
 
+/**
+ * 上游对「压缩请求体」的两种拒答（混合集群，不同节点说法不同）：
+ *   · `HTTP 400 · Invalid gzip body`
+ *   · `HTTP 400 · Unmarshal chat params failed … invalid character '\x1f' …`
+ * `\x1f` 就是 gzip 魔数 `1f 8b` 的首字节——网关把压缩字节当 JSON 解析了。
+ */
+export function isGzipBodyRejection(error) {
+  const text = `${error?.message ?? ''} ${error?.text ?? ''} ${JSON.stringify(error?.json ?? '')}`
+  return /invalid gzip body/i.test(text)
+    || /unmarshal chat params failed/i.test(text)
+    || /invalid character '\\x1f'/i.test(text)
+}
+
 /** 发一个请求并把 JSON 响应读全；非 2xx 直接按上游错误语义抛出。 */
 export async function jsonRequest(input) {
   const response = await send({ ...input, readBody: true })
   if (response.status >= 400 || (response.json !== undefined && looksLikeError(response.json))) {
+    // 自愈：配置里残留了正的压缩阈值时，gzip 被拒就降级明文重发一次，
+    // 而不是把 400 抛给用户。只在「这次确实压过」时重试，不会无限循环。
+    if (response.gzipUsed === true && isGzipBodyRejection(response)) {
+      return jsonRequest({ ...input, gzipThresholdBytes: 0 })
+    }
     throw failureOf(response)
   }
   return response
@@ -303,7 +335,12 @@ export async function openStream(input) {
     const chunks = []
     for await (const chunk of response.stream) chunks.push(chunk)
     const text = decodeBody(Buffer.concat(chunks), response.headers)
-    throw failureOf({ status: response.status, headers: response.headers, text, json: parseJson(text) })
+    const payload = { status: response.status, headers: response.headers, text, json: parseJson(text) }
+    // 自愈：这次压过、且上游拒的是压缩体 → 明文重发一次（配置残留正阈值时的兜底）。
+    if (response.gzipUsed === true && isGzipBodyRejection(payload)) {
+      return openStream({ ...input, gzipThresholdBytes: 0 })
+    }
+    throw failureOf(payload)
   }
   return {
     status: response.status,

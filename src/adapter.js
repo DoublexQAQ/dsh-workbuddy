@@ -402,7 +402,8 @@ export class WorkBuddyAdapter {
         body,
         signal: options.signal,
         timeoutMs: Number(this.deps.config.requestTimeoutMs ?? 120_000),
-        gzipThresholdBytes: Number(this.deps.config.gzipThresholdBytes ?? 4096),
+        // 上游不接收 gzip 请求体（实测 400），默认不压；配置给正数才会压。
+        gzipThresholdBytes: Number(this.deps.config.gzipThresholdBytes ?? 0),
         keepAlive: this.deps.config.keepAlive !== false,
       })
       const reader = readChatStream(response.lines, {

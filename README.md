@@ -222,7 +222,15 @@ config:
 
 ## 版本
 
-### 2.1.1（当前）
+### 2.1.2（当前）
+
+- 修复：`HTTP 400 · Invalid gzip body` / `Unmarshal chat params failed ('\x1f')`
+- 根因：上游网关**不接收 gzip 请求体**——压缩字节被当 JSON 解析，`\x1f`（gzip 魔数
+  `1f 8b` 首字节）触发拒答。两种报错来自混合集群的不同节点，发 gzip 等于碰运气
+- 修复：请求体默认**不压缩**（`gzipThresholdBytes: 0`），明文 64 KB 每个节点都过；
+  万一配置残留正阈值，被拒时自动降级明文重发一次（自愈，不会无限重发）
+
+### 2.1.1
 
 - 修复：WorkBuddy / CodeBuddy 聊天报 `HTTP 400 · a message has empty content`
 - 根因：国内域对 **user 消息内容非空**有硬校验，`content: []` 或 `[{text:''}]` 直接拒；
