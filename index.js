@@ -529,9 +529,33 @@ export function apply(ctx, config) {
           continue
         }
 
-        const daily = await runDailyGrowth({ session: credentials, deviceToken, config: growthConfig, platform })
+        // 签到闭环。401 是凭据问题（JWT 的 exp 看着没到期但上游已判死，实测会发生）：
+        // 先刷一次凭据再重跑，而不是把这个号的当日积分直接丢掉。
+        let daily = await runDailyGrowth({ session: credentials, deviceToken, config: growthConfig, platform })
+        const checkinCredentialFailure = daily.checkin !== undefined
+          && daily.checkin.ok !== true
+          && /401|Authorization Required|CREDENTIAL|凭据|token/i.test(String(daily.checkin.message ?? ''))
+        if (checkinCredentialFailure === true && settings.autoRefresh !== false) {
+          // force：上游已用 401 判死这个 token，不能被「JWT exp 还没到」短路掉。
+          const refreshed = await session.refreshAccount(target, { force: true })
+          if (refreshed === true) {
+            logger.info?.(`workbuddy: ${label} 签到撞 401，已强制刷新凭据并重试一次`)
+            const retryCredentials = await session.credentialsFor(accounts.byId(target.id) ?? target)
+            daily = await runDailyGrowth({ session: retryCredentials, deviceToken: session.deviceToken(), config: growthConfig, platform })
+            if (daily.checkin?.ok !== true) {
+              logger.warn?.(`workbuddy: ${label} 刷新凭据后签到仍失败（${String(daily.checkin?.message ?? '').slice(0, 80)}）`)
+            }
+          } else {
+            logger.warn?.(`workbuddy: ${label} 签到撞 401 且凭据刷新失败，需要重新登录`)
+          }
+        }
         const redeems = Array.isArray(daily.redeem) ? daily.redeem : []
         const draws = Array.isArray(daily.lottery?.draws) ? daily.lottery.draws : []
+        // 当日标记只在**真正完成**时写：失败必须留着，让调度器下一轮重试
+        // （真实事故：401 也把 checkin 写成今天，这个号当天 100 分白丢）。
+        const checkinDone = daily.checkin !== undefined && daily.checkin.ok === true
+        const activityDone = daily.activity !== undefined && daily.activity.ok === true
+        const todayDate = cstParts(daily.at ?? Date.now()).date
         accounts.update(target.id, {
           ...(daily.checkin === undefined
             ? {}
@@ -568,7 +592,11 @@ export function apply(ctx, config) {
                       : draws.map(row => row.ok === true ? row.prize ?? '已抽' : `失败 ${row.message ?? ''}`).join(' · '),
                 },
               }),
-          daily: { ...(target.daily ?? {}), checkin: cstParts(daily.at ?? Date.now()).date },
+          daily: {
+            ...(target.daily ?? {}),
+            ...(checkinDone === true ? { checkin: todayDate } : {}),
+            ...(activityDone === true ? { activity: todayDate } : {}),
+          },
         })
         results.push({
           id: target.id,
@@ -576,6 +604,9 @@ export function apply(ctx, config) {
           kind,
           platform,
           ok: daily.checkin?.ok === true,
+          // 凭据被上游撤销（refresh 也救不回来）是**永久**失败：重试 6 次只会
+          // 每分钟空撞一次上游，还刷 6 条日志。标成不可重试，调度器今天就不再碰它。
+          retryable: daily.checkin?.credential !== true,
           message: daily.checkin?.message ?? '完成',
           credit: daily.checkin?.credit,
           streakDays: daily.streakDays,
@@ -600,6 +631,9 @@ export function apply(ctx, config) {
       const outcome = await runTask({ account, kind: kind === 'activity' ? 'activity' : 'checkin' })
       const row = Array.isArray(outcome?.results) ? outcome.results[0] : undefined
       logger.info?.(`workbuddy: ${kind}（${account.nickname ?? account.uid ?? account.id}）：${row?.message ?? '完成'}`)
+      // 回传给调度器：ok=false 时它会回滚当日标记，下一轮重试（带次数封顶）；
+      // retryable=false（凭据被撤销这类永久失败）时不回滚重试，避免空撞上游。
+      return { ok: row?.ok === true, retryable: row?.retryable !== false, message: row?.message }
     },
   })
   scheduler.start(ctx)

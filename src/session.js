@@ -338,14 +338,20 @@ export class SessionStore {
   /**
    * 刷新**指定账号**的 token（与「当前账号」无关，积分任务要能逐个账号跑）。
    *
+   * `force=true` 跳过「JWT 还没到期就免刷」的短路：上游已经用 401 明说这个
+   * accessToken 死了（JWT 的 `exp` 只是本地推断，服务端可以提前作废——实测
+   * 会发生）。不强制刷的话，这里会 return true 但什么都没做，重试拿的还是
+   * 同一个死 token，等于假成功。
+   *
    * @param {object} account - 池子里的一行
+   * @param {{force?: boolean}} [options]
    * @returns {Promise<boolean>}
    */
-  async refreshAccount(account) {
+  async refreshAccount(account, { force = false } = {}) {
     const refreshToken = account?.auth?.refreshToken
     if (typeof refreshToken !== 'string' || refreshToken === '') return false
     const remaining = remainingMs(account?.auth ?? {})
-    if (remaining !== undefined && remaining > 120_000) return true
+    if (force !== true && remaining !== undefined && remaining > 120_000) return true
     try {
       const response = await jsonRequest({
         url: `${this.profile.endpoint}/v2/plugin/auth/token/refresh`,

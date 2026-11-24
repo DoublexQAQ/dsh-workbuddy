@@ -206,6 +206,16 @@ export async function dailyCheckin({ session, deviceToken, config = {}, signal, 
       if (error?.status === 401 || error?.code === 'CREDENTIAL') break
     }
   }
+  // 凭据失效要说人话：上游这里回的是 openresty 的 401 HTML（或刷新接口的
+  // `refresh token revoked`），原样贴出来用户看不懂该干什么。归一成一句可行动的提示。
+  if (/401|Authorization Required|token revoked|invalid_grant|CREDENTIAL/i.test(lastMessage)) {
+    return {
+      ok: false,
+      already: false,
+      credential: true,
+      message: '凭据已失效（上游撤销了这个账号的登录态），需要在「设置 → WorkBuddy 账号」里重新登录该账号',
+    }
+  }
   return { ok: false, already: false, message: lastMessage || '签到失败' }
 }
 

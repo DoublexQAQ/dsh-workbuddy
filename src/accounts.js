@@ -395,12 +395,43 @@ export class AccountsStore {
     return account
   }
 
-  /** 记录「今天这个任务已经跑过了」（按 CST 自然日）。 */
-  markDaily(id, kind, date) {
+  /**
+   * 记录「今天这个任务已经跑过了」（按 CST 自然日）。
+   *
+   * `date` 传 undefined 表示**回滚**当日标记——任务没真正完成，下一轮该再试
+   * （真实事故：签到撞上凭据过期 401，标记却照样写上今天，这个号当天 100 分白丢）。
+   * `attempts` 记当日累计尝试次数，调度器靠它给失败重试封顶，不会每分钟空撞上游。
+   * 计数带日期键：昨天撞满 6 次不能影响今天。
+   */
+  markDaily(id, kind, date, attempts) {
     const account = this.byId(id)
     if (account === undefined) return
-    account.daily = { ...(account.daily ?? {}), [kind]: date }
+    const daily = { ...(account.daily ?? {}) }
+    if (date === undefined) delete daily[kind]
+    else daily[kind] = date
+    if (attempts !== undefined) {
+      const key = `${kind}Attempts`
+      const previous = daily[key]
+      const hasRecord = previous !== null && typeof previous === 'object' && typeof previous.date === 'string'
+      // 日期键：打标时跟着这一天的 date；回滚时沿用已有记录（否则会把昨天的计数
+      // 挪到今天，跨天重置就失效了）。
+      const day = hasRecord
+        ? (date === undefined ? previous : { date, count: Number(previous.count) || 0 })
+        : { date: date ?? cstDay(), count: 0 }
+      daily[key] = {
+        date: day.date,
+        count: Number.isFinite(Number(attempts)) ? Number(attempts) : Number(day.count) || 0,
+      }
+    }
+    account.daily = daily
     this.save()
+  }
+
+  /** 某任务在某日的累计尝试次数（跨天自动归零）。 */
+  dailyAttempts(account, kind, date = cstDay()) {
+    const record = account?.daily?.[`${kind}Attempts`]
+    if (record === null || typeof record !== 'object') return 0
+    return record.date === date ? Number(record.count) || 0 : 0
   }
 
   /**

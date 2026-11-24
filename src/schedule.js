@@ -70,19 +70,26 @@ export class DailyScheduler {
    * @param {object} input
    * @param {import('./accounts.js').AccountsStore} input.accounts
    * @param {{info?: Function, warn?: Function, debug?: Function}} [input.logger]
-   * @param {(account: object, kind: string, date: string) => Promise<void>} input.run
+   * @param {(account: object, kind: string, date: string) => Promise<{ok?: boolean, retryable?: boolean}|void>} input.run
    * @param {number} [input.intervalMs] - 检查周期（默认 60 秒）
+   * @param {number} [input.retryCap] - 同一任务当日最多尝试次数（默认 6）
    */
-  constructor({ accounts, logger, run, intervalMs = 60_000 }) {
+  constructor({ accounts, logger, run, intervalMs = 60_000, retryCap = 6 }) {
     this.accounts = accounts
     this.logger = logger ?? {}
     this.run = run
     this.intervalMs = intervalMs
+    this.retryCap = Number.isFinite(retryCap) && retryCap > 0 ? Math.round(retryCap) : 6
     this.running = false
   }
 
   /**
    * 一次检查：触发到点的任务，并对每个启用的账号做追赶。
+   *
+   * 「今天跑过」先落盘再执行（崩溃/重启不会重复触发），但**失败要回滚**：
+   * 401 / 网络抖动这类失败如果占住当日标记，这个号今天就彻底错过了
+   * （真实事故：签到撞上凭据过期 401，之后整天没再试，100 分白丢）。
+   * 回滚带当日重试上限（`retryCap`），防止永久失败的号每分钟空转撞上游。
    *
    * @param {number} [at]
    * @param {{catchUp?: boolean}} [options]
@@ -99,13 +106,26 @@ export class DailyScheduler {
       for (const account of this.accounts.enabled()) {
         for (const kind of plan) {
           if (account.daily?.[kind] === date) continue
+          // 当日重试次数封顶（按天计数，昨天撞满不影响今天）：
+          // 失败回滚后也不许无限重撞上游。
+          const attempts = this.accounts.dailyAttempts(account, kind, date)
+          if (attempts >= this.retryCap) continue
           // 先落盘「今天跑过」，再执行：崩溃/重启不会变成重复触发。
-          this.accounts.markDaily(account.id, kind, date)
+          this.accounts.markDaily(account.id, kind, date, attempts + 1)
           executed.push({ id: account.id, kind, date })
+          let failed = false
           try {
-            await this.run(account, kind, date)
+            const result = await this.run(account, kind, date)
+            // run 返回 { ok } 时按它决定要不要回滚；没返回值就当作成功（保守）。
+            failed = result !== undefined && result !== null && result.ok === false && result.retryable !== false
           } catch (error) {
+            failed = true
             this.logger.warn?.(`workbuddy: ${kind} 失败（${account.nickname ?? account.uid ?? account.id}）：${error instanceof Error ? error.message : String(error)}`)
+          }
+          if (failed === true) {
+            // 回滚当日标记：下一分钟的 tick 会再试，直到成功或撞满 retryCap。
+            this.accounts.markDaily(account.id, kind, undefined, attempts + 1)
+            this.logger.warn?.(`workbuddy: ${kind} 未完成（${account.nickname ?? account.uid ?? account.id}），已放开重试（第 ${attempts + 1}/${this.retryCap} 次）`)
           }
         }
       }
@@ -152,7 +172,8 @@ export async function runNow({ accounts, account, sessionFor, runGrowth, deviceT
   const redeems = Array.isArray(result.redeem) ? result.redeem : []
   const draws = Array.isArray(result.lottery?.draws) ? result.lottery.draws : []
   accounts.update(account.id, {
-    daily: { ...(account.daily ?? {}), checkin: date },
+    // 与 index.js 的闭环同规则：只有真正签到成功才写当日标记，失败留着重试机会。
+    daily: { ...(account.daily ?? {}), ...(result.checkin?.ok === true ? { checkin: date } : {}) },
     ...(result.checkin === undefined
       ? {}
       : {
